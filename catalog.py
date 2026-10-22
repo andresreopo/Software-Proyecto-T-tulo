@@ -12,19 +12,16 @@ from skyfield.api import EarthSatellite, load, wgs84
 
 
 DATA = Path(__file__).resolve().parent / "data"
-SEED = Path(__file__).resolve().parent / "seed"
 CELESTRAK = "https://celestrak.org/NORAD/elements/gp.php"
 SATNOGS = "https://db.satnogs.org/api/transmitters/"
 HEADERS = {"User-Agent": "SatTrackMaiaSim/1.0 (academic prototype)"}
 
 
 def _read(name, default):
-    for folder in (DATA, SEED):
-        try:
-            return json.loads((folder / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-    return default
+    try:
+        return json.loads((DATA / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
 
 
 def _write(name, data):

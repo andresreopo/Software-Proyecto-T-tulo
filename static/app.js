@@ -6,7 +6,7 @@ const localTime = value => value ? new Date(value).toLocaleString("es-CL", {time
 const longTime = value => value ? new Date(value).toLocaleString("es-CL", {timeZone:"America/Santiago", day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false}) : "—";
 let selected = null, sessionId = null, latest = null, page = 1, pages = 1;
 let querySequence = 0, detailSequence = 0, polling = false, lastPhase = null, lastLock = null;
-let trail = [], waterfall = [];
+let trail = [], lastMapRefresh = 0, mapBaseSessionId = null;
 
 function toast(message) {
   const box = $("toast"); box.textContent = message; box.hidden = false;
@@ -43,7 +43,11 @@ function showSource(catalog) {
   if (catalog.last_error) $("source-note").textContent += ` Última actualización: ${catalog.last_error}`;
 }
 async function loadStatus() {
-  try { const data = await api("/api/status"); showSource(data.catalog); }
+  try {
+    const data = await api("/api/status");
+    showSource(data.catalog);
+    window.RF_SERVER_URL = (data.rf || {}).server_url || null;   // lo usa rf.js para el aviso de conexión
+  }
   catch (error) { toast(error.message); }
 }
 function satButton(item) {
@@ -142,8 +146,9 @@ async function startSession() {
     else body.transmitter_uuid = txChoice;
     if (sessionId) await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"stop"})}).catch(() => {});
     const data = await api("/api/session", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
-    sessionId = data.session_id; trail = []; waterfall = []; lastPhase = null; lastLock = null;
+    sessionId = data.session_id; trail = []; lastPhase = null; lastLock = null; mapBaseSessionId = null; lastMapRefresh = 0;
     $("pause-session").disabled = false; $("stop-session").disabled = false;
+    showTab("track");   // el seguimiento ocupa la pantalla; la selección queda en la pestaña 1
     renderState(data.state);
     log(`Simulación iniciada para ${selected.name}; próximo pase acelerado ${body.speed}×.`);
   } catch (error) { toast(error.message); }
@@ -154,8 +159,8 @@ async function control(action, extra = {}) {
   try {
     const data = await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action,...extra})});
     if (action === "stop") {
-      sessionId = null; latest = null; $("pause-session").disabled = true; $("stop-session").disabled = true;
-      $("tracking-title").textContent = "Sesión detenida"; $("signal-pill").textContent = "SIN SEÑAL"; $("signal-pill").className = "pill muted";
+      sessionId = null; latest = null; $("cartopy-map").hidden = true; $("map-base").hidden = true; mapBaseSessionId = null; $("map-placeholder").hidden = false; $("pause-session").disabled = true; $("stop-session").disabled = true;
+      $("tracking-title").textContent = "Sesión detenida"; 
       $("phase").textContent = "DETENIDA"; $("phase").className = "pill muted";
       $("snr").textContent = "—"; $("doppler").textContent = "—";
       requestAnimationFrame(drawAll);
@@ -174,6 +179,22 @@ async function pollSession() {
 function renderState(state) {
   if (state.status === "stopped") return;
   latest = state;
+  const mapImage = $("cartopy-map");
+  const mapBase = $("map-base");
+  if (sessionId && mapBaseSessionId !== sessionId) {
+    mapBaseSessionId = sessionId;
+    mapBase.src = `/api/session/${encodeURIComponent(sessionId)}/map-base.png`;
+    mapBase.hidden = false;
+    mapImage.hidden = false;
+    $("map-placeholder").hidden = true;
+  }
+  // Solo se vuelve a generar la capa transparente; la cartografía permanece estática.
+  if (sessionId && Date.now() - lastMapRefresh >= 700) {
+    lastMapRefresh = Date.now();
+    mapImage.src = `/api/session/${encodeURIComponent(sessionId)}/map-overlay.png?t=${lastMapRefresh}`;
+    mapImage.hidden = false;
+    $("map-placeholder").hidden = true;
+  }
   const geo = state.geometry, rotor = state.rotor, rf = state.receiver;
   $("tracking-title").textContent = `${state.name} · #${state.norad_id}`;
   $("sim-time").textContent = longTime(state.sim_time_chile) + ` · ${state.speed}×`;
@@ -185,20 +206,15 @@ function renderState(state) {
   $("range").textContent = `${fmt(geo.range_km, 0)} km`;
   $("rf-frequency").replaceChildren(document.createTextNode(fmt(rf.frequency_mhz, 3) + " "));
   const mhz = document.createElement("span"); mhz.textContent = "MHz"; $("rf-frequency").append(mhz);
-  $("rf-mode").textContent = `${rf.mode} · ${rf.source === "manual" ? "frecuencia manual" : "SatNOGS DB"} · receptor virtual`;
-  $("snr").textContent = `${fmt(rf.snr_db, 1)} dB`;
+  $("rf-mode").textContent = `${rf.mode} · ${rf.source === "manual" ? "frecuencia manual" : rf.source === "Maia SDR" ? "stream de Maia" : "SatNOGS DB"}`;
+  $("snr").textContent = rf.snr_db == null ? "—" : `${fmt(rf.snr_db, 1)} dB`;
   $("doppler").textContent = `${rf.doppler_hz >= 0 ? "+" : ""}${fmt(rf.doppler_hz, 0)} Hz`;
-  $("frames").textContent = rf.frames_received.toLocaleString("es-CL");
-  const signal = $("signal-pill"); signal.textContent = rf.signal_detected ? "SEÑAL SIMULADA" : "SIN SEÑAL"; signal.className = "pill " + (rf.signal_detected ? "" : "muted");
   $("pause-session").textContent = state.status === "paused" ? "Reanudar" : "Pausar";
   if (lastPhase !== state.phase) { log(`Fase del pase: ${state.phase}.`); lastPhase = state.phase; }
-  if (lastLock !== rf.signal_detected) { if (lastLock !== null) log(rf.signal_detected ? "Receptor virtual: señal detectada." : "Receptor virtual: señal perdida."); lastLock = rf.signal_detected; }
   const previous = trail.at(-1);
   if (!previous || previous.time !== state.sim_time_utc) {
     trail.push({time:state.sim_time_utc, az:geo.az_deg, el:geo.el_deg, lat:geo.subsat_lat_deg, lon:geo.subsat_lon_deg});
     if (trail.length > 120) trail.shift();
-    waterfall.unshift(rf.spectrum_db);
-    if (waterfall.length > 100) waterfall.pop();
   }
   requestAnimationFrame(drawAll);
 }
@@ -216,7 +232,7 @@ function skyPoint(az, el, cx, cy, radius) {
 }
 function dot(ctx, x, y, radius, color) { ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); }
 function drawSky() {
-  const {ctx,width:w,height:h} = canvasContext("sky-canvas"), cx = w / 2, cy = h / 2 + 6, radius = Math.min(w * .42, h * .43);
+  const {ctx,width:w,height:h} = canvasContext("sky-canvas"), cx = w / 2, cy = h / 2 + 2, radius = Math.max(20, Math.min(w * .42, (h - 48) / 2));
   ctx.strokeStyle = "#2a4b60"; ctx.lineWidth = 1;
   for (const k of [1,.67,.33]) { ctx.beginPath(); ctx.arc(cx,cy,radius*k,0,Math.PI*2); ctx.stroke(); }
   ctx.beginPath(); ctx.moveTo(cx-radius,cy); ctx.lineTo(cx+radius,cy); ctx.moveTo(cx,cy-radius); ctx.lineTo(cx,cy+radius); ctx.stroke();
@@ -250,30 +266,7 @@ function drawMap() {
   dot(ctx,ox,oy,5,"#ffc16c"); ctx.fillStyle="#c5dce6";ctx.font="10px Consolas";ctx.fillText("Santiago",ox+8,oy-7);
   ctx.fillStyle="#67879b";ctx.fillText("180° O",8,h-8);ctx.fillText("180° E",w-50,h-8);
 }
-function drawSpectrum() {
-  const {ctx,width:w,height:h}=canvasContext("spectrum-canvas"), l=41,r=w-9,t=12,b=h-28;
-  ctx.strokeStyle="#244459";ctx.lineWidth=1;ctx.font="10px Consolas";ctx.fillStyle="#65869a";
-  for(let db=-110;db<=-60;db+=10){const y=b-(db+115)/60*(b-t);ctx.beginPath();ctx.moveTo(l,y);ctx.lineTo(r,y);ctx.stroke();ctx.fillText(String(db),3,y+3);}
-  for(let i=0;i<=6;i++){const x=l+(r-l)*i/6;ctx.beginPath();ctx.moveTo(x,t);ctx.lineTo(x,b);ctx.stroke();ctx.textAlign="center";ctx.fillText(String(i-3),x,b+15);}ctx.textAlign="left";
-  if(!latest)return;
-  const values=latest.receiver.spectrum_db;ctx.strokeStyle="#57c9ed";ctx.lineWidth=1.7;ctx.beginPath();
-  for(let i=0;i<values.length;i++){const x=l+(r-l)*i/(values.length-1),y=b-(values[i]+115)/60*(b-t);i?ctx.lineTo(x,y):ctx.moveTo(x,y);}ctx.stroke();
-  const peak=values.indexOf(Math.max(...values)),px=l+(r-l)*peak/(values.length-1);
-  ctx.strokeStyle="#ffc16c";ctx.beginPath();ctx.moveTo(px,t);ctx.lineTo(px,b);ctx.stroke();
-  ctx.fillStyle="#88adbf";ctx.fillText("MHz desde portadora",l+5,h-6);
-}
-function drawWaterfall() {
-  const {ctx,width:w,height:h}=canvasContext("waterfall-canvas");ctx.fillStyle="#091b29";ctx.fillRect(0,0,w,h);
-  if(!waterfall.length)return;
-  const source=document.createElement("canvas");source.width=256;source.height=waterfall.length;
-  const sctx=source.getContext("2d"),image=sctx.createImageData(source.width,source.height);
-  for(let y=0;y<waterfall.length;y++)for(let x=0;x<256;x++){
-    const v=Math.max(0,Math.min(1,(waterfall[y][x]+112)/50)),i=(y*256+x)*4;
-    image.data[i]=Math.round(8+220*v*v);image.data[i+1]=Math.round(27+180*v);image.data[i+2]=Math.round(48+55*(1-v));image.data[i+3]=255;
-  }
-  sctx.putImageData(image,0,0);ctx.imageSmoothingEnabled=true;ctx.drawImage(source,0,0,w,h);
-}
-function drawAll(){drawSky();drawMap();drawSpectrum();drawWaterfall();}
+function drawAll(){ if ($("panel-track").hidden) return; drawSky(); }
 
 let searchTimer;
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadCatalog(true),250);});
@@ -293,4 +286,22 @@ window.addEventListener("resize",()=>requestAnimationFrame(drawAll));
 setInterval(()=>{$("clock").textContent=new Date().toLocaleString("es-CL",{timeZone:"America/Santiago",hour12:false})+" CL";},1000);
 setInterval(pollSession,900);
 setInterval(loadStatus,30000);
+// ── Pestañas (pantalla de 7"): 1 Selección · 2 Seguimiento · 3 Monitor RF ──
+const TABS = ["select", "track", "rf"];
+function showTab(name) {
+  if (!TABS.includes(name)) name = "select";
+  TABS.forEach(t => {
+    $("panel-" + t).hidden = t !== name;
+    const button = $("tab-" + t); button.setAttribute("aria-selected", String(t === name)); button.tabIndex = t === name ? 0 : -1;
+  });
+  try { localStorage.setItem("sattrack.tab", name); } catch (_) {}
+  try { history.replaceState(null, "", "#" + name); } catch (_) {}
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));   // los canvas se redimensionan al mostrarse
+}
+document.querySelector(".tabbar").addEventListener("click", e => { const b = e.target.closest("[data-tab]"); if (b) showTab(b.dataset.tab); });
+document.querySelector(".tabbar").addEventListener("keydown", e => {
+  const i = TABS.findIndex(t => $("tab-" + t).getAttribute("aria-selected") === "true");
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { const n = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length]; showTab(n); $("tab-" + n).focus(); e.preventDefault(); }
+});
+(() => { let saved = null; try { saved = localStorage.getItem("sattrack.tab"); } catch (_) {} showTab(location.hash.slice(1) || saved || "select"); })();
 loadStatus();loadCatalog();requestAnimationFrame(drawAll);

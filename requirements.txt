@@ -2,3 +2,12 @@ Flask>=3.0,<4
 requests>=2.31,<3
 skyfield>=1.49,<2
 tzdata>=2026.1
+
+matplotlib>=3.8,<4
+cartopy>=0.22,<1
+
+websocket-client>=1.7,<2
+
+websocket-client>=1.7,<2
+flask-sock>=0.7,<1   # solo para mock_maia.py
+numpy>=1.26      # solo para mock_maia.py

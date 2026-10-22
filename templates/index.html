@@ -2,24 +2,31 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SatTrack + Maia · Laboratorio simulado</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SATTRACK · Laboratorio simulado</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='rf.js') }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-mark" aria-hidden="true">◈</div>
-      <div class="brand"><strong>SATTRACK <span>+</span> MAIA</strong><small>Selector · seguimiento · recepción</small></div>
-      <span class="tag sim-tag">● LABORATORIO SIMULADO</span>
+      <div class="brand"><strong>SAT<span>TRACK</span></strong><small>Laboratorio simulado</small></div>
+      <nav class="tabbar" role="tablist" aria-label="Secciones">
+        <button type="button" class="tabbtn" role="tab" id="tab-select" data-tab="select" aria-controls="panel-select" aria-selected="true"><b>1</b><span>Selección</span></button>
+        <button type="button" class="tabbtn" role="tab" id="tab-track" data-tab="track" aria-controls="panel-track" aria-selected="false"><b>2</b><span>Seguimiento</span></button>
+        <button type="button" class="tabbtn" role="tab" id="tab-rf" data-tab="rf" aria-controls="panel-rf" aria-selected="false"><b>3</b><span>Monitor RF</span><i id="tab-rf-dot" class="dot" aria-hidden="true"></i></button>
+      </nav>
       <span id="source-indicator" class="tag source-tag">Cargando catálogo…</span>
       <time id="clock" class="clock"></time>
     </header>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <main class="workspace">
-      <aside class="left-column">
+    <main class="tabs-root">
+      <section class="tab-panel" id="panel-select" role="tabpanel" aria-labelledby="tab-select">
+        <div class="select-layout">
+          <div class="select-col select-left">
         <section class="card observer-card">
           <div class="card-title"><span class="step">01</span><div><h2>Estación de observación</h2><p>Punto de referencia para todos los pases</p></div></div>
           <div class="field-grid">
@@ -45,14 +52,13 @@
             <button data-norad="39159">PROBA-V</button><button data-norad="58025">PVCC</button>
             <button data-norad="41240">JASON-3</button><button data-norad="29479">HINODE</button>
           </div>
-          <div class="catalog-summary"><span id="catalog-summary">Cargando objetos…</span><button id="refresh-sources" title="Actualizar CelesTrak y SatNOGS" aria-label="Actualizar fuentes">↻</button></div>
+          <div class="catalog-summary"><span id="catalog-summary">Cargando objetos…</span><span class="refresh-group"><label for="refresh-sources" class="refresh-text">Actualizar bases</label><button id="refresh-sources" type="button" title="Actualizar CelesTrak y SatNOGS" aria-label="Actualizar bases">↻</button></span></div>
           <div id="satellite-list" class="satellite-list" aria-live="polite"></div>
           <div class="pager"><button id="prev-page" class="button ghost">← Anterior</button><span id="page-label">—</span><button id="next-page" class="button ghost">Siguiente →</button></div>
         </section>
         <section class="source-note" id="source-note">Las frecuencias son registros de una base colaborativa; un pase no garantiza transmisión.</section>
-      </aside>
-
-      <section class="center-column">
+          </div>
+          <div class="select-col select-right">
         <section class="card selected-card">
           <div class="section-kicker"><span class="step">03</span> SATÉLITE SELECCIONADO</div>
           <div class="selected-header"><div><h1 id="selected-name">Selecciona un satélite</h1><p id="selected-meta">Escoge un objeto del catálogo para ver su órbita y sus próximos pases.</p></div><span id="selected-visibility" class="pill muted">SIN SELECCIÓN</span></div>
@@ -71,14 +77,18 @@
           <div class="passes-head"><span>Próximos pases sobre el mínimo</span><small>Hora de Chile · próximos 5 días</small></div>
           <div id="passes" class="pass-list"><div class="empty-note">Los pases aparecerán al seleccionar un satélite.</div></div>
         </section>
+          </div>
+        </div>
+      </section>
 
+      <section class="tab-panel" id="panel-track" role="tabpanel" aria-labelledby="tab-track" hidden>
         <section class="card tracking-card">
           <div class="card-top"><div><div class="section-kicker">SEGUIMIENTO ORBITAL / ROTOR</div><h2 id="tracking-title">Esperando una sesión</h2></div><div class="controls"><button id="pause-session" class="button secondary" disabled>Pausar</button><button id="stop-session" class="button ghost" disabled>Detener</button></div></div>
           <div class="sim-time-row"><span>TIEMPO DE SIMULACIÓN</span><strong id="sim-time">—</strong><span id="phase" class="pill muted">EN ESPERA</span></div>
           <div class="progress-track"><div id="pass-progress"></div></div>
           <div class="tracking-visuals">
             <div class="visual"><div class="visual-heading"><span>CIELO LOCAL</span><small>Az / El · objetivo y rotor simulado</small></div><canvas id="sky-canvas" aria-label="Plano del cielo con satélite y rotor"></canvas></div>
-            <div class="visual"><div class="visual-heading"><span>TRAZA SOBRE LA TIERRA</span><small>Subpunto orbital simulado</small></div><canvas id="map-canvas" aria-label="Mapa de la posición del satélite"></canvas></div>
+            <div class="visual map-visual"><div class="visual-heading"><span>MAPA CARTOGRÁFICO</span><small>Observador y subpunto orbital</small></div><div class="map-image-wrap"><img id="map-base" class="map-layer map-base" alt="Base cartográfica" src=""/><img id="cartopy-map" class="map-layer map-overlay" alt="Puntos dinámicos del observador y satélite" src=""/><div id="map-placeholder">Inicia una sesión para mostrar el mapa</div></div></div>
           </div>
           <div class="telemetry-grid">
             <div><small>OBJETIVO</small><strong id="target-pointing">— / —</strong><span>Azimut / elevación</span></div>
@@ -87,21 +97,77 @@
             <div><small>DISTANCIA</small><strong id="range">—</strong><span>Estación ↔ satélite</span></div>
           </div>
         </section>
+        <section class="card event-card"><div class="section-kicker">REGISTRO DE SESIÓN</div><div id="event-log" class="event-log"><div>Selecciona un satélite para comenzar.</div></div></section>
       </section>
 
-      <aside class="right-column">
+      <section class="tab-panel" id="panel-rf" role="tabpanel" aria-labelledby="tab-rf" hidden>
         <section class="card receiver-card">
-          <div class="card-top"><div><div class="section-kicker">RECEPCIÓN / PLUTO SIMULADA</div><h2>Monitor RF</h2></div><span id="signal-pill" class="pill muted">SIN SEÑAL</span></div>
-          <div class="rf-main"><small>FRECUENCIA CENTRAL</small><strong id="rf-frequency">— <span>MHz</span></strong><p id="rf-mode">Selecciona una bajada S para preparar el receptor.</p></div>
-          <div class="rf-stats"><div><small>SNR SIMULADA</small><strong id="snr">—</strong></div><div><small>DOPPLER ESTIMADO</small><strong id="doppler">—</strong></div><div><small>TRAMAS SINTÉTICAS</small><strong id="frames">0</strong></div></div>
-          <div class="plot-heading"><span>ESPECTRO</span><small id="spectrum-range">±3 MHz</small></div>
-          <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro simulado"></canvas>
-          <div class="plot-heading"><span>WATERFALL</span><small>Filas más nuevas arriba</small></div>
-          <canvas id="waterfall-canvas" class="waterfall-canvas" aria-label="Cascada de señal simulada"></canvas>
-          <p class="simulation-note">Datos RF sintéticos. No se conecta a la Pluto ni transmite comandos a hardware.</p>
+          <div class="rf-layout">
+            <div class="rf-col rf-col-plot">
+          <div class="rf-tabs" role="tablist" aria-label="Vista de señal">
+            <button type="button" class="rf-tab" role="tab" id="rf-tab-spec" aria-selected="true">Espectro</button>
+            <button type="button" class="rf-tab" role="tab" id="rf-tab-wf" aria-selected="false">Waterfall</button>
+            <small id="spectrum-range">—</small>
+          </div>
+          <div class="rf-plot">
+            <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro RF recibido desde Maia"></canvas>
+            <canvas id="waterfall-canvas" class="waterfall-canvas" aria-label="Cascada RF recibida desde Maia" hidden></canvas>
+            <div id="rx-empty" class="rf-empty">Esperando datos de Maia…</div>
+          </div>
+          <div class="rf-readout">
+            <span>Cursor <b id="rx-cursor">—</b></span>
+            <span>Pico <b id="rx-peak">—</b></span>
+            <span>Frames/s <b id="rx-fps">—</b></span>
+          </div>
+
+          <p id="rf-note" class="simulation-note">Monitor RF alimentado por Maia SDR (4096 puntos, dB tal como llegan, sin calibrar). Cambiar la sintonía no depende del satélite seleccionado.</p>
+            </div>
+            <div class="rf-col rf-col-ctl">
+          <div class="card-top"><div><div class="section-kicker">RECEPCIÓN / PLUTO + MAIA</div><h2>Monitor RF</h2></div><span id="signal-pill" class="pill muted">SIN SEÑAL</span></div>
+          <div class="rf-main"><small>FRECUENCIA OBJETIVO (CATÁLOGO)</small><strong id="rf-frequency">— <span>MHz</span></strong><p id="rf-mode">Selecciona una bajada S para preparar el receptor.</p></div>
+          <div class="rf-stats"><div><small>SNR</small><strong id="snr">—</strong></div><div><small>DOPPLER ESTIMADO</small><strong id="doppler">—</strong></div><div><small>TRAMAS RF</small><strong id="frames">0</strong></div></div>
+          <details class="rf-sec" open>
+            <summary>Receptor (AD9361)</summary>
+            <div class="rf-sec-body">
+              <small class="rf-label">Frecuencias frecuentes</small>
+              <div class="quick-list" id="rx-presets">
+                <button type="button" data-mhz="137.5">NOAA / Meteor 137.5</button>
+                <button type="button" data-mhz="145.8">VHF satélites 145.8</button>
+                <button type="button" data-mhz="437.5">UHF satélites 437.5</button>
+                <button type="button" data-mhz="1090">ADS-B 1090</button>
+              </div>
+              <div class="field-grid">
+                <label>Frecuencia RX <span>MHz</span><input id="rx-freq" type="number" step="any"></label>
+                <label>Sample rate <span>MS/s</span><input id="rx-rate" type="number" step="any"></label>
+                <label>Bandwidth RF <span>MHz</span><input id="rx-bw" type="number" step="any"></label>
+                <label>Gain <span>dB</span><input id="rx-gain" type="number" step="any"></label>
+                <label class="span2">Gain mode
+                  <select id="rx-gmode"><option>Manual</option><option>FastAttack</option><option>SlowAttack</option><option>Hybrid</option></select>
+                </label>
+              </div>
+              <button id="rx-apply" type="button" class="button secondary full">Aplicar configuración</button>
+              <div class="rf-meta">Fc <b id="rx-m-fc">—</b> · Span <b id="rx-m-span">—</b> · RBW <b id="rx-m-rbw">—</b></div>
+            </div>
+          </details>
+
+          <details class="rf-sec">
+            <summary>Visualización</summary>
+            <div class="rf-sec-body">
+              <label class="rf-check"><input id="rx-auto" type="checkbox" checked> Escala vertical automática</label>
+              <div id="rx-manual" class="field-grid" hidden>
+                <label>Mínimo <span>dB</span><input id="rx-ymin" type="number" value="-120"></label>
+                <label>Máximo <span>dB</span><input id="rx-ymax" type="number" value="-20"></label>
+              </div>
+              <label class="rf-check"><input id="rx-hold" type="checkbox"> Retención de picos</label>
+              <label class="rf-check"><input id="rx-marker" type="checkbox" checked> Marcador de pico</label>
+              <label class="rf-range">Suavizado <input id="rx-avg" type="range" min="0" max="0.95" step="0.05" value="0.5"></label>
+              <p class="rf-hint">Doble clic sobre el espectro o el waterfall para sintonizar esa frecuencia.</p>
+            </div>
+          </details>
+            </div>
+          </div>
         </section>
-        <section class="card event-card"><div class="section-kicker">REGISTRO DE SESIÓN</div><div id="event-log" class="event-log"><div>Selecciona un satélite para comenzar.</div></div></section>
-      </aside>
+      </section>
     </main>
   </div>
 </body>
