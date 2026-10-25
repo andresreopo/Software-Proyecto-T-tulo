@@ -20,11 +20,22 @@ def map_extent(observer):
     lon, lat = float(observer["lon"]), float(observer["lat"])
     return (lon - 60, lon + 60, max(-90, lat - 35), min(90, lat + 35))
 
+AX_RECT = [.065, .09, .91, .81]   # posición de los ejes dentro de la figura (fracción)
+
+def observer_fraction(observer):
+    """Posición del observador en la imagen del mapa como fracción (x desde la izquierda, y desde arriba).
+    Los PNG se estiran sobre todo el recuadro, así que la fracción vale para cualquier tamaño en pantalla."""
+    west, east, south, north = map_extent(observer)
+    fx = (float(observer["lon"]) - west) / (east - west)
+    fy = (float(observer["lat"]) - south) / (north - south)
+    x0, y0, w, h = AX_RECT
+    return {"x": round(x0 + w * fx, 5), "y": round(1 - (y0 + h * fy), 5)}
+
 def _figure(width, height, transparent=False):
     dpi = 100
     fig = plt.figure(figsize=(width/dpi, height/dpi), dpi=dpi,
                      facecolor=("none" if transparent else BG))
-    ax_rect = [.065, .09, .91, .81]
+    ax_rect = AX_RECT
     if HAS_CARTOPY:
         proj = ccrs.PlateCarree()
         ax = fig.add_axes(ax_rect, projection=proj)

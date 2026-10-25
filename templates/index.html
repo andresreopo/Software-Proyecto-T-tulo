@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   <script src="{{ url_for('static', filename='rf.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='rotor.js') }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -82,88 +83,70 @@
       </section>
 
       <section class="tab-panel" id="panel-track" role="tabpanel" aria-labelledby="tab-track" hidden>
-        <section class="card tracking-card">
-          <div class="card-top"><div><div class="section-kicker">SEGUIMIENTO ORBITAL / ROTOR</div><h2 id="tracking-title">Esperando una sesión</h2></div><div class="controls"><button id="pause-session" class="button secondary" disabled>Pausar</button><button id="stop-session" class="button ghost" disabled>Detener</button></div></div>
-          <div class="sim-time-row"><span>TIEMPO DE SIMULACIÓN</span><strong id="sim-time">—</strong><span id="phase" class="pill muted">EN ESPERA</span></div>
-          <div class="progress-track"><div id="pass-progress"></div></div>
-          <div class="tracking-visuals">
-            <div class="visual"><div class="visual-heading"><span>CIELO LOCAL</span><small>Az / El · objetivo y rotor simulado</small></div><canvas id="sky-canvas" aria-label="Plano del cielo con satélite y rotor"></canvas></div>
-            <div class="visual map-visual"><div class="visual-heading"><span>MAPA CARTOGRÁFICO</span><small>Observador y subpunto orbital</small></div><div class="map-image-wrap"><img id="map-base" class="map-layer map-base" alt="Base cartográfica" src=""/><img id="cartopy-map" class="map-layer map-overlay" alt="Puntos dinámicos del observador y satélite" src=""/><div id="map-placeholder">Inicia una sesión para mostrar el mapa</div></div></div>
-          </div>
-          <div class="telemetry-grid">
-            <div><small>OBJETIVO</small><strong id="target-pointing">— / —</strong><span>Azimut / elevación</span></div>
-            <div><small>ROTOR SIMULADO</small><strong id="rotor-pointing">— / —</strong><span>Azimut / elevación</span></div>
-            <div><small>ERROR APUNTAMIENTO</small><strong id="pointing-error">—</strong><span>Grados</span></div>
-            <div><small>DISTANCIA</small><strong id="range">—</strong><span>Estación ↔ satélite</span></div>
-          </div>
-        </section>
-        <section class="card event-card"><div class="section-kicker">REGISTRO DE SESIÓN</div><div id="event-log" class="event-log"><div>Selecciona un satélite para comenzar.</div></div></section>
+        <div class="track-grid">
+          <section class="card radar-card">
+            <div class="card-top radar-top"><div><div class="section-kicker">SEGUIMIENTO ORBITAL</div><h2 id="tracking-title">Esperando una sesión</h2></div><div class="controls"><span id="phase" class="pill muted">EN ESPERA</span><button id="pause-session" class="button secondary" disabled>Pausar</button><button id="stop-session" class="button ghost" disabled>Detener</button></div></div>
+            <div class="radar-row">
+              <div class="radar-wrap"><canvas id="sky-canvas" aria-label="Radar orbital: trayectoria, azimut y elevación"></canvas></div>
+              <aside class="el-bar" aria-label="Elevación">
+                <div class="el-title">EL</div>
+                <div class="el-scale" id="el-scale">
+                  <div class="el-track"><div class="el-fill" id="el-fill"></div></div>
+                  <div class="el-mark tgt" id="el-tgt" hidden><span id="el-tgt-v"></span></div>
+                  <div class="el-mark cur" id="el-cur" hidden><span id="el-cur-v"></span></div>
+                </div>
+                <div class="el-legend"><div><span class="c">▬</span> Act. <b id="el-leg-c">—</b></div><div><span class="t">╌</span> Obj. <b id="el-leg-t">—</b></div></div>
+              </aside>
+            </div>
+            <div class="sim-time-row"><span>SIM</span><strong id="sim-time">—</strong></div>
+            <div class="progress-track"><div id="pass-progress"></div></div>
+          </section>
+          <section class="card link-card">
+            <div class="card-top"><div><div class="section-kicker">TRACKER · ESP32</div><h2>Puerto serial</h2></div><span id="rot-pill" class="pill muted">DESCONECTADO</span></div>
+            <div class="link-controls">
+              <label class="rotor-field">Puerto COM
+                <span class="rotor-port-row"><select id="rot-port"></select><button type="button" class="button ghost" id="rot-refresh" title="Buscar puertos" aria-label="Buscar puertos">↻</button></span>
+              </label>
+              <label class="rotor-field">Baudios<input type="number" id="rot-baud" value="115200" step="1"></label>
+              <button type="button" class="button primary full" id="rot-conn">Conectar</button>
+            </div>
+            <p class="rotor-hint" id="rot-status">Desconectado.</p>
+            <div class="console-head"><span>CONSOLA</span>
+              <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK</label>
+              <button type="button" class="button ghost" id="con-pause">Pausar</button>
+              <button type="button" class="button ghost" id="con-clear">Limpiar</button></div>
+            <div id="serial-console" class="serial-console" role="log" aria-live="off"></div>
+          </section>
+        </div>
       </section>
 
       <section class="tab-panel" id="panel-rf" role="tabpanel" aria-labelledby="tab-rf" hidden>
         <section class="card receiver-card">
           <div class="rf-layout">
             <div class="rf-col rf-col-plot">
-          <div class="rf-tabs" role="tablist" aria-label="Vista de señal">
-            <button type="button" class="rf-tab" role="tab" id="rf-tab-spec" aria-selected="true">Espectro</button>
-            <button type="button" class="rf-tab" role="tab" id="rf-tab-wf" aria-selected="false">Waterfall</button>
-            <small id="spectrum-range">—</small>
-          </div>
-          <div class="rf-plot">
-            <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro RF recibido desde Maia"></canvas>
-            <canvas id="waterfall-canvas" class="waterfall-canvas" aria-label="Cascada RF recibida desde Maia" hidden></canvas>
-            <div id="rx-empty" class="rf-empty">Esperando datos de Maia…</div>
-          </div>
-          <div class="rf-readout">
-            <span>Cursor <b id="rx-cursor">—</b></span>
-            <span>Pico <b id="rx-peak">—</b></span>
-            <span>Frames/s <b id="rx-fps">—</b></span>
-          </div>
-
-          <p id="rf-note" class="simulation-note">Monitor RF alimentado por Maia SDR (4096 puntos, dB tal como llegan, sin calibrar). Cambiar la sintonía no depende del satélite seleccionado.</p>
+              <div class="rf-plot rf-plot-spec">
+                <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro RF recibido desde Maia"></canvas>
+                <div id="rx-empty" class="rf-empty">Esperando datos de Maia…</div>
+              </div>
+              <div class="rf-plot rf-plot-wf">
+                <canvas id="waterfall-canvas" class="waterfall-canvas" aria-label="Cascada RF recibida desde Maia"></canvas>
+              </div>
             </div>
             <div class="rf-col rf-col-ctl">
-          <div class="card-top"><div><div class="section-kicker">RECEPCIÓN / PLUTO + MAIA</div><h2>Monitor RF</h2></div><span id="signal-pill" class="pill muted">SIN SEÑAL</span></div>
-          <div class="rf-main"><small>FRECUENCIA OBJETIVO (CATÁLOGO)</small><strong id="rf-frequency">— <span>MHz</span></strong><p id="rf-mode">Selecciona una bajada S para preparar el receptor.</p></div>
-          <div class="rf-stats"><div><small>SNR</small><strong id="snr">—</strong></div><div><small>DOPPLER ESTIMADO</small><strong id="doppler">—</strong></div><div><small>TRAMAS RF</small><strong id="frames">0</strong></div></div>
-          <details class="rf-sec" open>
-            <summary>Receptor (AD9361)</summary>
-            <div class="rf-sec-body">
-              <small class="rf-label">Frecuencias frecuentes</small>
-              <div class="quick-list" id="rx-presets">
-                <button type="button" data-mhz="137.5">NOAA / Meteor 137.5</button>
-                <button type="button" data-mhz="145.8">VHF satélites 145.8</button>
-                <button type="button" data-mhz="437.5">UHF satélites 437.5</button>
-                <button type="button" data-mhz="1090">ADS-B 1090</button>
+              <div class="rf-peak">
+                <small>FRECUENCIA PICO</small>
+                <strong id="rx-peak-big">—</strong>
+                <span class="rf-peak-unit">MHz</span>
+                <span id="signal-pill" class="pill muted">SIN SEÑAL</span>
               </div>
-              <div class="field-grid">
-                <label>Frecuencia RX <span>MHz</span><input id="rx-freq" type="number" step="any"></label>
-                <label>Sample rate <span>MS/s</span><input id="rx-rate" type="number" step="any"></label>
-                <label>Bandwidth RF <span>MHz</span><input id="rx-bw" type="number" step="any"></label>
-                <label>Gain <span>dB</span><input id="rx-gain" type="number" step="any"></label>
-                <label class="span2">Gain mode
-                  <select id="rx-gmode"><option>Manual</option><option>FastAttack</option><option>SlowAttack</option><option>Hybrid</option></select>
+              <div class="rf-gain card-inset">
+                <label>Modo de ganancia
+                  <select id="rx-gmode"><option value="Manual">Manual</option><option value="FastAttack">Fast attack</option><option value="SlowAttack">Slow attack</option><option value="Hybrid">Hybrid</option></select>
                 </label>
+                <label>Ganancia <span>dB</span><input id="rx-gain" type="number" step="any"></label>
+                <input id="rx-gslider" class="rf-slider" type="range" min="0" max="73" step="1" value="50" aria-label="Ganancia (deslizador)">
+                <button id="rx-apply" type="button" class="button secondary full">Aplicar</button>
               </div>
-              <button id="rx-apply" type="button" class="button secondary full">Aplicar configuración</button>
-              <div class="rf-meta">Fc <b id="rx-m-fc">—</b> · Span <b id="rx-m-span">—</b> · RBW <b id="rx-m-rbw">—</b></div>
-            </div>
-          </details>
-
-          <details class="rf-sec">
-            <summary>Visualización</summary>
-            <div class="rf-sec-body">
-              <label class="rf-check"><input id="rx-auto" type="checkbox" checked> Escala vertical automática</label>
-              <div id="rx-manual" class="field-grid" hidden>
-                <label>Mínimo <span>dB</span><input id="rx-ymin" type="number" value="-120"></label>
-                <label>Máximo <span>dB</span><input id="rx-ymax" type="number" value="-20"></label>
-              </div>
-              <label class="rf-check"><input id="rx-hold" type="checkbox"> Retención de picos</label>
-              <label class="rf-check"><input id="rx-marker" type="checkbox" checked> Marcador de pico</label>
-              <label class="rf-range">Suavizado <input id="rx-avg" type="range" min="0" max="0.95" step="0.05" value="0.5"></label>
-              <p class="rf-hint">Doble clic sobre el espectro o el waterfall para sintonizar esa frecuencia.</p>
-            </div>
-          </details>
             </div>
           </div>
         </section>

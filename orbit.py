@@ -116,3 +116,26 @@ def find_passes(record, observer, start=None, days=5, limit=12):
                 "in_progress": True, "continuous": True,
             })
     return passes
+
+
+def az_el_rates(record, observer, when, h=0.5):
+    """(az °, el °, vaz °/s, vel °/s) por segundo de tiempo simulado, con diferencia centrada ±h s."""
+    sat = spacecraft(record)
+    topo = sat - station(observer)
+    times = TS.from_datetimes([when - dt.timedelta(seconds=h), when, when + dt.timedelta(seconds=h)])
+    el, az, _ = topo.at(times).altaz()
+    a, e = az.degrees, el.degrees
+    vaz = (((a[2] - a[0] + 540.0) % 360.0) - 180.0) / (2 * h)       # sin salto en 0°/360°
+    vel = (e[2] - e[0]) / (2 * h)
+    return float(a[1]) % 360.0, float(e[1]), float(vaz), float(vel)
+
+
+def pass_rate_peaks(record, observer, aos, los):
+    """Velocidades angulares máximas (°/s de tiempo real de la órbita) durante un pase, muestreadas a 1 s."""
+    import numpy as np
+    n = max(3, int((los - aos).total_seconds()) + 1)
+    n = min(n, 3600)
+    times = TS.from_datetimes([aos + dt.timedelta(seconds=i) for i in range(n)])
+    el, az, _ = (spacecraft(record) - station(observer)).at(times).altaz()
+    azu = np.degrees(np.unwrap(np.radians(az.degrees)))
+    return float(np.abs(np.gradient(azu)).max()), float(np.abs(np.gradient(el.degrees)).max())

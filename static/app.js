@@ -6,14 +6,16 @@ const localTime = value => value ? new Date(value).toLocaleString("es-CL", {time
 const longTime = value => value ? new Date(value).toLocaleString("es-CL", {timeZone:"America/Santiago", day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false}) : "—";
 let selected = null, sessionId = null, latest = null, page = 1, pages = 1;
 let querySequence = 0, detailSequence = 0, polling = false, lastPhase = null, lastLock = null;
-let trail = [], lastMapRefresh = 0, mapBaseSessionId = null;
+let trail = [], passPath = null, pathSession = null, stateAt = 0;
 
 function toast(message) {
   const box = $("toast"); box.textContent = message; box.hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => box.hidden = true, 6000);
 }
 function log(message) {
-  const box = $("event-log"), row = document.createElement("div"), time = document.createElement("time");
+  const box = $("event-log");
+  if (!box) { console.log("[SATTRACK]", message); return; }
+  const row = document.createElement("div"), time = document.createElement("time");
   if (box.children.length === 1 && box.firstElementChild.textContent === "Selecciona un satélite para comenzar.") box.replaceChildren();
   time.textContent = new Date().toLocaleTimeString("es-CL", {timeZone:"America/Santiago", hour12:false}) + "  ";
   row.append(time, document.createTextNode(message)); box.prepend(row);
@@ -141,13 +143,14 @@ async function startSession() {
   const button = $("start-session"); button.disabled = true;
   try {
     const txChoice = $("transmitter").value;
-    const body = {norad_id:selected.norad_id, ...observer(), speed:Number($("speed").value)};
+    const body = {norad_id:selected.norad_id, ...observer(), speed:Number($("speed").value), rotor_follow:!!(window.rotorAutoFollow && window.rotorAutoFollow())};
     if (txChoice === "manual") body.manual_frequency_mhz = Number($("manual-frequency").value);
     else body.transmitter_uuid = txChoice;
     if (sessionId) await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"stop"})}).catch(() => {});
     const data = await api("/api/session", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
-    sessionId = data.session_id; trail = []; lastPhase = null; lastLock = null; mapBaseSessionId = null; lastMapRefresh = 0;
+    sessionId = data.session_id; trail = []; lastPhase = null; lastLock = null; passPath = null; pathSession = null;
     $("pause-session").disabled = false; $("stop-session").disabled = false;
+    if (data.follow_error) toast(data.follow_error);
     showTab("track");   // el seguimiento ocupa la pantalla; la selección queda en la pestaña 1
     renderState(data.state);
     log(`Simulación iniciada para ${selected.name}; próximo pase acelerado ${body.speed}×.`);
@@ -159,10 +162,9 @@ async function control(action, extra = {}) {
   try {
     const data = await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action,...extra})});
     if (action === "stop") {
-      sessionId = null; latest = null; $("cartopy-map").hidden = true; $("map-base").hidden = true; mapBaseSessionId = null; $("map-placeholder").hidden = false; $("pause-session").disabled = true; $("stop-session").disabled = true;
+      sessionId = null; latest = null; passPath = null; pathSession = null; $("pause-session").disabled = true; $("stop-session").disabled = true;
       $("tracking-title").textContent = "Sesión detenida"; 
       $("phase").textContent = "DETENIDA"; $("phase").className = "pill muted";
-      $("snr").textContent = "—"; $("doppler").textContent = "—";
       requestAnimationFrame(drawAll);
       log("Sesión de seguimiento detenida.");
     } else { renderState(data.state); log(action === "speed" ? `Velocidad ajustada a ${extra.speed}×.` : action === "pause" ? "Simulación pausada." : "Simulación reanudada."); }
@@ -179,36 +181,13 @@ async function pollSession() {
 function renderState(state) {
   if (state.status === "stopped") return;
   latest = state;
-  const mapImage = $("cartopy-map");
-  const mapBase = $("map-base");
-  if (sessionId && mapBaseSessionId !== sessionId) {
-    mapBaseSessionId = sessionId;
-    mapBase.src = `/api/session/${encodeURIComponent(sessionId)}/map-base.png`;
-    mapBase.hidden = false;
-    mapImage.hidden = false;
-    $("map-placeholder").hidden = true;
-  }
-  // Solo se vuelve a generar la capa transparente; la cartografía permanece estática.
-  if (sessionId && Date.now() - lastMapRefresh >= 700) {
-    lastMapRefresh = Date.now();
-    mapImage.src = `/api/session/${encodeURIComponent(sessionId)}/map-overlay.png?t=${lastMapRefresh}`;
-    mapImage.hidden = false;
-    $("map-placeholder").hidden = true;
-  }
+  stateAt = performance.now();
+  if (sessionId && pathSession !== sessionId) loadPath(sessionId);
   const geo = state.geometry, rotor = state.rotor, rf = state.receiver;
   $("tracking-title").textContent = `${state.name} · #${state.norad_id}`;
   $("sim-time").textContent = longTime(state.sim_time_chile) + ` · ${state.speed}×`;
   const phase = $("phase"); phase.textContent = state.phase.toUpperCase(); phase.className = "pill " + (state.phase === "en pase" ? "" : state.phase === "finalizado" ? "warn" : "muted");
   $("pass-progress").style.width = `${Math.round(state.progress * 100)}%`;
-  $("target-pointing").textContent = `${fmt(rotor.target_az_deg, 1)}° / ${fmt(rotor.target_el_deg, 1)}°`;
-  $("rotor-pointing").textContent = `${fmt(rotor.az_deg, 1)}° / ${fmt(rotor.el_deg, 1)}°`;
-  $("pointing-error").textContent = `${fmt(rotor.pointing_error_deg, 1)}°`;
-  $("range").textContent = `${fmt(geo.range_km, 0)} km`;
-  $("rf-frequency").replaceChildren(document.createTextNode(fmt(rf.frequency_mhz, 3) + " "));
-  const mhz = document.createElement("span"); mhz.textContent = "MHz"; $("rf-frequency").append(mhz);
-  $("rf-mode").textContent = `${rf.mode} · ${rf.source === "manual" ? "frecuencia manual" : rf.source === "Maia SDR" ? "stream de Maia" : "SatNOGS DB"}`;
-  $("snr").textContent = rf.snr_db == null ? "—" : `${fmt(rf.snr_db, 1)} dB`;
-  $("doppler").textContent = `${rf.doppler_hz >= 0 ? "+" : ""}${fmt(rf.doppler_hz, 0)} Hz`;
   $("pause-session").textContent = state.status === "paused" ? "Reanudar" : "Pausar";
   if (lastPhase !== state.phase) { log(`Fase del pase: ${state.phase}.`); lastPhase = state.phase; }
   const previous = trail.at(-1);
@@ -231,42 +210,75 @@ function skyPoint(az, el, cx, cy, radius) {
   return [cx + r * Math.sin(radians), cy - r * Math.cos(radians)];
 }
 function dot(ctx, x, y, radius, color) { ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); }
-function drawSky() {
-  const {ctx,width:w,height:h} = canvasContext("sky-canvas"), cx = w / 2, cy = h / 2 + 2, radius = Math.max(20, Math.min(w * .42, (h - 48) / 2));
-  ctx.strokeStyle = "#2a4b60"; ctx.lineWidth = 1;
-  for (const k of [1,.67,.33]) { ctx.beginPath(); ctx.arc(cx,cy,radius*k,0,Math.PI*2); ctx.stroke(); }
-  ctx.beginPath(); ctx.moveTo(cx-radius,cy); ctx.lineTo(cx+radius,cy); ctx.moveTo(cx,cy-radius); ctx.lineTo(cx,cy+radius); ctx.stroke();
-  ctx.fillStyle = "#65869a"; ctx.font = "11px Consolas"; ctx.textAlign = "center";
-  ctx.fillText("N",cx,cy-radius-10); ctx.fillText("S",cx,cy+radius+17); ctx.fillText("E",cx+radius+12,cy+4); ctx.fillText("O",cx-radius-12,cy+4);
-  if (!latest) { ctx.fillStyle = "#708da1"; ctx.fillText("Inicia una sesión",cx,cy+4); return; }
-  ctx.strokeStyle = "#57c9ed88"; ctx.lineWidth = 2; ctx.beginPath(); let started = false;
-  for (const p of trail) { if (p.el < 0) continue; const [x,y] = skyPoint(p.az,p.el,cx,cy,radius); if (!started) {ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
-  ctx.stroke();
-  const [sx,sy] = skyPoint(latest.geometry.az_deg,latest.geometry.el_deg,cx,cy,radius);
-  const [rx,ry] = skyPoint(latest.rotor.az_deg,latest.rotor.el_deg,cx,cy,radius);
-  dot(ctx,sx,sy,6,"#a6e65e"); dot(ctx,rx,ry,4,"#ffc16c");
-  ctx.fillStyle = "#b9d5e2"; ctx.font = "10px Consolas"; ctx.textAlign = "left";
-  ctx.fillText("● satélite",11,h-21); ctx.fillStyle="#ffc16c"; ctx.fillText("● rotor",11,h-8);
+async function loadPath(id) {
+  pathSession = id; passPath = null;
+  try { const d = await api(`/api/session/${encodeURIComponent(id)}/path`); if (sessionId === id) { passPath = d.path; requestAnimationFrame(drawAll); } }
+  catch (_) { if (sessionId === id) pathSession = null; }
 }
-function geoPoint(lat,lon,w,h) { return [(lon+180)/360*w, (90-lat)/180*h]; }
-function drawMap() {
-  const {ctx,width:w,height:h} = canvasContext("map-canvas");
-  ctx.fillStyle="#091c2b"; ctx.fillRect(0,0,w,h); ctx.strokeStyle="#1f3f51";ctx.lineWidth=1;
-  for (let lon=-120;lon<=120;lon+=60){const x=(lon+180)/360*w;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();}
-  for (let lat=-60;lat<=60;lat+=30){const y=(90-lat)/180*h;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
-  const obs = observer(), [ox,oy]=geoPoint(obs.lat,obs.lon,w,h);
-  if (latest) {
-    ctx.strokeStyle="#57c9edaa";ctx.lineWidth=1.6;ctx.beginPath();let prev=null;
-    for (const p of trail){const xy=geoPoint(p.lat,p.lon,w,h);if(!prev||Math.abs(xy[0]-prev[0])>w/2)ctx.moveTo(...xy);else ctx.lineTo(...xy);prev=xy;}
-    ctx.stroke();
-    const [sx,sy]=geoPoint(latest.geometry.subsat_lat_deg,latest.geometry.subsat_lon_deg,w,h);
-    ctx.strokeStyle="#79c4c777";ctx.setLineDash([3,4]);ctx.beginPath();ctx.moveTo(ox,oy);ctx.lineTo(sx,sy);ctx.stroke();ctx.setLineDash([]);
-    dot(ctx,sx,sy,5,"#a6e65e");
+// Hora simulada interpolada entre consultas al servidor (avanza a `speed`× salvo en pausa).
+const utcMs = v => Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(v) ? v : v + "Z");
+function simNow() {
+  if (!latest) return null;
+  const base = utcMs(latest.sim_time_utc);
+  return base + (latest.status === "running" ? (performance.now() - stateAt) * latest.speed : 0);
+}
+const clock = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60, p = n => String(n).padStart(2, "0"); return (h ? h + ":" : "") + p(m) + ":" + p(x); };
+function drawSky() {
+  const {ctx,width:w,height:h} = canvasContext("sky-canvas"), mono = "Consolas, 'JetBrains Mono', monospace";
+  const margin = 17, radius = Math.max(20, Math.min(w, h) / 2 - margin), cx = w - radius - margin - 2, cy = h / 2;
+  // Anillos de elevación (0°, 30°, 60°) y ejes de azimut cada 45°
+  ctx.strokeStyle = "#9fc0d5"; ctx.lineWidth = 1;
+  for (const k of [1, 2/3, 1/3]) { ctx.beginPath(); ctx.arc(cx, cy, radius * k, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.beginPath();
+  for (let a = 0; a < 180; a += 45) { const r = a * Math.PI / 180; ctx.moveTo(cx - radius * Math.sin(r), cy + radius * Math.cos(r)); ctx.lineTo(cx + radius * Math.sin(r), cy - radius * Math.cos(r)); }
+  ctx.stroke();
+  ctx.fillStyle = "#799bb0"; ctx.font = `9px ${mono}`; ctx.textAlign = "left";
+  ctx.fillText("30°", cx + 3, cy - radius * 2/3 + 10); ctx.fillText("60°", cx + 3, cy - radius / 3 + 10);
+  ctx.fillStyle = "#2b4e60"; ctx.font = `700 11px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("N", cx, cy - radius - 9); ctx.fillText("S", cx, cy + radius + 9); ctx.fillText("E", cx + radius + 9, cy); ctx.fillText("O", cx - radius - 9, cy);
+  ctx.textBaseline = "alphabetic";
+  if (!latest) {
+    ctx.fillStyle = "#5e7b8f"; ctx.font = `12px ${mono}`; ctx.textAlign = "center"; ctx.fillText("Inicia una sesión", cx, cy + 4);
+    return;
   }
-  dot(ctx,ox,oy,5,"#ffc16c"); ctx.fillStyle="#c5dce6";ctx.font="10px Consolas";ctx.fillText("Santiago",ox+8,oy-7);
-  ctx.fillStyle="#67879b";ctx.fillText("180° O",8,h-8);ctx.fillText("180° E",w-50,h-8);
+  // Trayectoria completa del pase (tenue) y tramo ya recorrido (brillante)
+  const line = (pts, color, width, dash) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []); ctx.beginPath(); let on = false;
+    for (const p of pts) { if (p.el < 0) { on = false; continue; } const [x, y] = skyPoint(p.az, p.el, cx, cy, radius); on ? ctx.lineTo(x, y) : ctx.moveTo(x, y); on = true; }
+    ctx.stroke(); ctx.setLineDash([]);
+  };
+  if (passPath && passPath.length) {
+    const pts = passPath.map(([az, el]) => ({az, el}));
+    line(pts, "#1284a866", 1.6, [5, 4]);
+    for (const [i, name] of [[0, "AOS"], [pts.length - 1, "LOS"]]) {
+      const [x, y] = skyPoint(pts[i].az, Math.max(0, pts[i].el), cx, cy, radius);
+      dot(ctx, x, y, 3, "#395d70"); ctx.fillStyle = "#395d70"; ctx.font = `600 9px ${mono}`; ctx.textAlign = "center";
+      ctx.fillText(name, Math.max(14, Math.min(w - 14, x)), y + (y < cy ? -7 : 14));
+    }
+  }
+  line(trail.map(p => ({az: p.az, el: p.el})), "#1284a8", 2.2);
+  const g = latest.geometry, up = g.el_deg >= 0;
+  const [rx, ry] = skyPoint(latest.rotor.az_deg, latest.rotor.el_deg, cx, cy, radius);
+  dot(ctx, rx, ry, 4, "#935500");
+  if (up) { const [sx, sy] = skyPoint(g.az_deg, g.el_deg, cx, cy, radius); dot(ctx, sx, sy, 7, "#61a119"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke(); }
+
+  // Lectura en tiempo real (esquina superior izquierda) y cuenta atrás
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#5e7e90"; ctx.font = `700 10px ${mono}`; ctx.fillText("AZIMUT", 4, 14); ctx.fillText("ELEVACIÓN", 4, 58);
+  ctx.fillStyle = "#061319"; ctx.font = `700 24px ${mono}`; ctx.fillText(g.az_deg.toFixed(1) + "°", 4, 38);
+  ctx.fillStyle = up ? "#61a119" : "#061319"; ctx.fillText(g.el_deg.toFixed(1) + "°", 4, 82);
+  const t = simNow(), aos = utcMs(latest.pass.aos_utc), los = utcMs(latest.pass.los_utc);
+  let label, secs, color;
+  if (t < aos) { label = "AOS en"; secs = (aos - t) / 1000; color = "#935500"; }
+  else if (t < los) { label = "LOS en"; secs = (los - t) / 1000; color = "#61a119"; }
+  else { label = "PASE TERMINADO"; secs = null; color = "#395d70"; }
+  ctx.fillStyle = "#5e7e90"; ctx.font = `700 10px ${mono}`; ctx.fillText(label.toUpperCase(), 4, 106);
+  if (secs !== null) { ctx.fillStyle = color; ctx.font = `700 22px ${mono}`; ctx.fillText(clock(secs), 4, 129); }
+  ctx.fillStyle = "#5e7e90"; ctx.font = `10px ${mono}`;
+  ctx.fillStyle = "#61a119"; ctx.fillText("● satélite", 4, h - 20); ctx.fillStyle = "#935500"; ctx.fillText("● rotor", 4, h - 7);
 }
 function drawAll(){ if ($("panel-track").hidden) return; drawSky(); }
+setInterval(() => { if (latest && !$("panel-track").hidden) drawSky(); }, 250);
 
 let searchTimer;
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadCatalog(true),250);});

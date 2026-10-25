@@ -57,6 +57,11 @@ class SimulationSession:
             return self.sim_anchor
         return self.sim_anchor + dt.timedelta(seconds=(wall - self.wall_anchor) * self.speed)
 
+    def clock(self):
+        """(hora simulada, velocidad, en pausa, detenida) de forma atómica, para el seguidor del rotor."""
+        with self.lock:
+            return self._sim_time(time.monotonic()), self.speed, self.paused, self.stopped
+
     def control(self, action, speed=None):
         with self.lock:
             wall = time.monotonic()
@@ -79,6 +84,17 @@ class SimulationSession:
                 self.stopped = True
             else:
                 raise ValueError("Acción no válida")
+
+    def path(self, step_s=4):
+        """Trayectoria completa del pase [[az, el], ...] entre AOS y LOS (para dibujar el radar)."""
+        aos = dt.datetime.fromisoformat(self.pass_info["aos_utc"])
+        los = dt.datetime.fromisoformat(self.pass_info["los_utc"])
+        n = max(2, int((los - aos).total_seconds() / step_s))
+        out = []
+        for i in range(n + 1):
+            g = position(self.record, self.observer, aos + (los - aos) * (i / n))
+            out.append([round(g["az_deg"], 2), round(g["el_deg"], 2)])
+        return out
 
     def state(self):
         with self.lock:

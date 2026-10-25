@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import queue
+import threading
 
 from flask import Flask, jsonify, render_template, request, Response
 from flask_sock import Sock
@@ -13,12 +14,38 @@ from flask_sock import Sock
 from catalog import store
 from orbit import UTC, find_passes, position
 from simulation import SimulationSession, sessions
-from map_plot import render_map_base_png, render_map_overlay_png
+from map_plot import render_map_base_png, render_map_overlay_png, observer_fraction
 from maia_rf import maia_rf
+import rotor_config
+from serial_link import SerialLink, list_ports, SIM_PORT
+from rotor_follow import RotorFollower
 
 
 app = Flask(__name__)
 sock = Sock(app)
+
+# ── Rotor (ESP32 por puerto serial): cada cambio se reparte a los navegadores por /ws/rotor ──
+_rotor_subs: set = set()
+_rotor_lock = threading.Lock()
+
+
+def _rotor_broadcast(event):
+    text = json.dumps(event)
+    with _rotor_lock:
+        subs = list(_rotor_subs)
+    for q in subs:
+        try:
+            q.put_nowait(text)
+        except queue.Full:
+            try:
+                q.get_nowait()
+                q.put_nowait(text)
+            except (queue.Empty, queue.Full):
+                pass
+
+
+rotor = SerialLink(on_event=_rotor_broadcast)
+follower = RotorFollower(rotor, on_event=_rotor_broadcast)
 
 
 def observer_from(values):
@@ -137,8 +164,16 @@ def start_session():
         else:
             transmitter = {**transmitter, "source": "SatNOGS DB"}
         session = SimulationSession(record, observer, transmitter, speed)
+        follower.stop(hold=True)                       # una sesión nueva reemplaza al seguimiento anterior
         sessions.add(session)
-        return jsonify({"ok": True, "session_id": session.id, "state": session.state()})
+        follow_error = None
+        if body.get("rotor_follow"):
+            try:
+                follower.start(session)
+            except RuntimeError as exc:                # rotor desconectado: la sesión sigue, sin rotor
+                follow_error = str(exc)
+        return jsonify({"ok": True, "session_id": session.id, "state": _full_state(session),
+                        "follow": follower.state(), "follow_error": follow_error})
     except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
         return error(exc)
 
@@ -169,6 +204,39 @@ def _apply_real_rf(state):
     state["hardware_connected"] = rf["connected"]
     state["simulated"] = False
     return state
+
+
+def _angle_diff(a, b):
+    return (a - b + 180) % 360 - 180
+
+
+def _apply_rotor(state, session=None):
+    """Con la ESP32 conectada, la posición del rotor del estado es la que ella informa (POS), no la simulada."""
+    rs = rotor.state()
+    r = state.get("rotor")
+    if r is None or state.get("status") == "stopped":
+        return state
+    r["connected"] = rs["connected"]
+    r["stale"] = False
+    if rs["connected"] and rs["az"] is not None:
+        r["az_deg"], r["el_deg"] = round(rs["az"], 2), round(rs["el"], 2)
+        r["simulated"] = False
+        r["source"] = "ESP32" + (" (sim)" if rs["sim"] else "")
+        r["stale"] = rs["age"] is None or rs["age"] > rotor_config.SERIAL_STALE_S
+        if r.get("target_az_deg") is not None:
+            err_az = abs(_angle_diff(r["target_az_deg"], rs["az"]))
+            r["pointing_error_deg"] = round(math.hypot(err_az * max(0.15, math.cos(math.radians(r["target_el_deg"]))),
+                                                       r["target_el_deg"] - rs["el"]), 2)
+    if session is not None:
+        state["map"] = {"obs": observer_fraction(session.observer)}
+    return state
+
+
+def _full_state(session):
+    state = session.state()
+    if state.get("status") == "stopped":
+        return state
+    return _apply_rotor(_apply_real_rf(state), session)
 
 
 @sock.route("/ws/rf")
@@ -233,11 +301,17 @@ def get_session(session_id):
     if session is None:
         return error("Sesión no encontrada o expirada", 404)
     try:
-        state = session.state()
-        state = _apply_real_rf(state)
-        return jsonify({"ok": True, "state": state})
+        return jsonify({"ok": True, "state": _full_state(session)})
     except (ValueError, ArithmeticError) as exc:
         return error(exc, 500)
+
+
+@app.get("/api/session/<session_id>/path")
+def session_path(session_id):
+    session = sessions.get(session_id)
+    if session is None or session.stopped:
+        return jsonify(ok=False, error="Sesión no encontrada."), 404
+    return jsonify(ok=True, path=session.path())
 
 
 @app.get("/api/session/<session_id>/map-base.png")
@@ -281,9 +355,102 @@ def control_session(session_id):
     try:
         speed = int(body["speed"]) if "speed" in body else None
         session.control(body.get("action"), speed)
-        return jsonify({"ok": True, "state": session.state()})
+        if body.get("action") == "stop" and follower.session_id() == session.id:
+            follower.stop(hold=True)
+        return jsonify({"ok": True, "state": _full_state(session)})
     except (TypeError, ValueError, ArithmeticError) as exc:
         return error(exc)
+
+
+# ── Rotor (ESP32) ────────────────────────────────────────────────────────────
+
+def _num(body, key, label):
+    try:
+        v = float(body.get(key))
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} debe ser un número.")
+    return v
+
+
+@app.get("/api/serial/ports")
+def serial_ports():
+    return jsonify({"ok": True, "ports": list_ports()})
+
+
+@app.post("/api/serial/connect")
+def serial_connect():
+    body = request.get_json(silent=True) or {}
+    port = str(body.get("port") or "").strip()
+    if not port:
+        return error("Elige un puerto serial.")
+    if port not in {p["device"] for p in list_ports()}:     # solo puertos que el sistema lista (o "sim")
+        return error("Puerto no disponible: pulsa ↻ para actualizar la lista.")
+    follower.stop(hold=False)
+    try:
+        baud = int(float(body.get("baud", rotor_config.SERIAL_BAUD)))
+        if not 1200 <= baud <= 3_000_000:
+            raise ValueError("Los baudios deben estar entre 1200 y 3000000.")
+    except (TypeError, ValueError) as exc:
+        return error(exc)
+    try:
+        return jsonify({"ok": True, **rotor.connect(port, baud)})
+    except RuntimeError as exc:
+        return error(f"No se pudo abrir {port}: {exc}", 502)
+
+
+@app.post("/api/serial/disconnect")
+def serial_disconnect():
+    follower.stop(hold=False)
+    rotor.disconnect()
+    return jsonify({"ok": True, **rotor.state()})
+
+
+@app.get("/api/rotor")
+def rotor_state():
+    return jsonify({"ok": True, **rotor.state(), "follow": follower.state()})
+
+
+@app.get("/api/rotor/follow")
+def rotor_follow_state():
+    return jsonify({"ok": True, **follower.state()})
+
+
+@app.post("/api/session/<session_id>/rotor-follow")
+def rotor_follow(session_id):
+    session = sessions.get(session_id)
+    if session is None:
+        return error("Sesión no encontrada o expirada", 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        if body.get("enabled"):
+            return jsonify({"ok": True, **follower.start(session)})
+        if follower.session_id() == session.id or not follower.active():
+            follower.stop(hold=True)
+        return jsonify({"ok": True, **follower.state()})
+    except RuntimeError as exc:
+        return error(exc, 409)
+
+
+@sock.route("/ws/rotor")
+def ws_rotor(ws):
+    q = queue.Queue(maxsize=16)
+    with _rotor_lock:
+        _rotor_subs.add(q)
+    try:
+        ws.send(json.dumps({"type": "rotor", **rotor.state()}))
+        ws.send(json.dumps({"type": "follow", **follower.state()}))
+        while True:
+            try:
+                item = q.get(timeout=15)
+            except queue.Empty:
+                ws.send(json.dumps({"type": "ping"}))
+                continue
+            ws.send(item)
+    except Exception:
+        pass
+    finally:
+        with _rotor_lock:
+            _rotor_subs.discard(q)
 
 
 if __name__ == "__main__":
@@ -291,15 +458,26 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5003)
     parser.add_argument("--refresh-on-start", action="store_true")
+    parser.add_argument("--pluto-ip", default=None,
+                        help="IP de la Pluto con firmware Maia (puerto 8000). Por defecto 192.168.2.1")
     parser.add_argument("--maia-url", default=None,
-                        help="URL base del servidor Maia SDR (por defecto MAIA_SERVER_URL o http://127.0.0.1:8000)")
+                        help="URL completa de Maia (p. ej. http://192.168.2.1:8000 o http://127.0.0.1:8000 para el mock). "
+                             "También: variable MAIA_SERVER_URL")
+    parser.add_argument("--serial-port", help="Puerto serial de la ESP32 a abrir al iniciar (COM5, /dev/ttyUSB0 o sim)")
+    parser.add_argument("--serial-baud", type=int, default=rotor_config.SERIAL_BAUD)
     args = parser.parse_args()
+    if args.serial_port:
+        try:
+            rotor.connect(args.serial_port, args.serial_baud)
+            print(f"[SATTRACK] Rotor conectado en {args.serial_port} ({args.serial_baud} baud)")
+        except RuntimeError as exc:
+            print(f"[SATTRACK] No se pudo abrir el rotor en {args.serial_port}: {exc}")
     if args.maia_url:
-        maia_rf.base_url = args.maia_url.rstrip("/")
-        from urllib.parse import urlparse
-        parsed = urlparse(maia_rf.base_url)
-        scheme = "wss" if parsed.scheme == "https" else "ws"
-        maia_rf.ws_url = f"{scheme}://{parsed.netloc}/waterfall"
+        maia_rf.set_url(args.maia_url)
+    elif args.pluto_ip:
+        maia_rf.set_url(f"http://{args.pluto_ip}:8000")
+    print(f"\n[SATTRACK] Maia SDR en {maia_rf.base_url}  (WS {maia_rf.ws_url})")
+    print("[SATTRACK] Si no conecta: probar  curl " + maia_rf.base_url + "/api/ad9361   y verificar la IP de la Pluto\n")
     maia_rf.start()
     if args.refresh_on_start:
         store.refresh_async()

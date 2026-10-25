@@ -17,12 +17,12 @@ let cfg = {freq: 0, rate: 0, bw: 0};
 let N = 0;
 let smooth = null, peaks = null;
 let lo = -120, hi = -20;
-let hoverX = null, frames = 0, totalFrames = 0, lastFrameAt = 0, view = "spec", wsState = "disconnected";
+let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
 const PAD = {l: 46, r: 10, t: 10, b: 24};
 
 // ── Mapa de color del waterfall ─────────────────────────────────────────────
 const LUT = (() => {
-  const stops = [[0,[8,16,48]],[.25,[24,70,140]],[.5,[40,170,170]],[.75,[240,200,70]],[1,[255,250,230]]];
+  const stops = [[0,[240,246,252]],[.25,[150,195,232]],[.5,[30,115,190]],[.75,[232,120,20]],[1,[110,10,20]]];
   const out = new Uint8ClampedArray(256 * 3);
   for (let i = 0; i < 256; i++) {
     const t = i / 255; let k = 0;
@@ -46,14 +46,14 @@ function niceStep(range, target) {
 const fmtMHz = v => v.toFixed(4) + " MHz";
 const fmtHz = v => v >= 1e6 ? (v / 1e6).toFixed(3) + " MHz" : v >= 1e3 ? (v / 1e3).toFixed(2) + " kHz" : v.toFixed(0) + " Hz";
 
-function prep(c, ctx) {
+function prep(c, ctx, bottom = PAD.b) {
   fit(c);
   const d = devicePixelRatio || 1;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, c.width, c.height); ctx.scale(d, d);
   const w = c.width / d, h = c.height / d;
-  return {w, h, x0: PAD.l, x1: w - PAD.r, y0: PAD.t, y1: h - PAD.b};
+  return {w, h, x0: PAD.l, x1: w - PAD.r, y0: PAD.t, y1: h - bottom};
 }
-function freqAxis(ctx, g, gridColor) {
+function freqAxis(ctx, g, gridColor, labels) {
   const f0 = (cfg.freq - cfg.rate / 2) / 1e6, f1 = (cfg.freq + cfg.rate / 2) / 1e6;
   const sx = niceStep(f1 - f0, 5);
   ctx.font = "10px " + css("--mono"); ctx.fillStyle = css("--muted");
@@ -62,19 +62,19 @@ function freqAxis(ctx, g, gridColor) {
   for (let f = Math.ceil(f0 / sx) * sx; f <= f1; f += sx) {
     const x = Math.round(g.x0 + (f - f0) / (f1 - f0) * (g.x1 - g.x0)) + .5;
     ctx.beginPath(); ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y1); ctx.stroke();
-    ctx.fillText(f.toFixed(sx < 1 ? 2 : 1), x, g.y1 + 6);
+    if (labels) ctx.fillText(f.toFixed(sx < 1 ? 2 : 1), x, g.y1 + 6);
   }
 }
 function hoverLine(ctx, g) {
   if (hoverX === null || hoverX < g.x0 || hoverX > g.x1) return;
-  ctx.strokeStyle = "rgba(226,232,240,.35)"; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.strokeStyle = "rgba(15,30,45,.45)"; ctx.lineWidth = 1; ctx.beginPath();
   ctx.moveTo(hoverX + .5, g.y0); ctx.lineTo(hoverX + .5, g.y1); ctx.stroke();
 }
 function peakIndex(a) { let k = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[k]) k = i; return k; }
 
 // ── Espectro ────────────────────────────────────────────────────────────────
 function drawSpectrum() {
-  const g = prep(specC, sctx);
+  const g = prep(specC, sctx, 4);
   if (!cfg.rate) return;
   const border = css("--line");
   const Y = v => g.y1 - (v - lo) / (hi - lo) * (g.y1 - g.y0);
@@ -87,7 +87,7 @@ function drawSpectrum() {
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke();
     sctx.fillText(v.toFixed(0), g.x0 - 6, y);
   }
-  freqAxis(sctx, g, border);
+  freqAxis(sctx, g, border, false);
   sctx.strokeStyle = border; sctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
   if (!smooth) return;
 
@@ -101,10 +101,9 @@ function drawSpectrum() {
     }
     sctx.stroke();
   };
-  if (q("rx-hold").checked && peaks) line(peaks, css("--amber"), 1);
-  line(smooth, css("--cyan"), 1.4);
+    line(smooth, css("--cyan"), 1.4);
 
-  if (q("rx-marker").checked) {
+  {
     const k = peakIndex(smooth), x = g.x0 + k / (smooth.length - 1) * (g.x1 - g.x0), y = Y(smooth[k]);
     sctx.fillStyle = css("--amber"); sctx.beginPath();
     sctx.moveTo(x, y - 3); sctx.lineTo(x - 5, y - 12); sctx.lineTo(x + 5, y - 12); sctx.closePath(); sctx.fill();
@@ -133,7 +132,7 @@ function drawWaterfall() {
   if (!cfg.rate) return;
   wctx.imageSmoothingEnabled = true;
   wctx.drawImage(wfBuf, 0, 0, wfBuf.width, wfBuf.height, g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
-  freqAxis(wctx, g, "rgba(148,163,184,.22)");
+  freqAxis(wctx, g, "rgba(148,163,184,.22)", true);
   wctx.strokeStyle = css("--line"); wctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
   wctx.fillStyle = css("--muted"); wctx.font = "10px " + css("--mono"); wctx.textAlign = "right";
   wctx.textBaseline = "top";    wctx.fillText("ahora", g.x0 - 5, g.y0);
@@ -146,17 +145,8 @@ let drawPending = false;
 function draw() {
   if (drawPending) return;
   drawPending = true;
-  requestAnimationFrame(() => { drawPending = false; if (q("panel-rf").hidden) return; view === "spec" ? drawSpectrum() : drawWaterfall(); });
+  requestAnimationFrame(() => { drawPending = false; if (q("panel-rf").hidden) return; drawSpectrum(); drawWaterfall(); });
 }
-function setView(v) {
-  view = v;
-  specC.hidden = v !== "spec"; wfC.hidden = v !== "wf";
-  q("rf-tab-spec").setAttribute("aria-selected", v === "spec");
-  q("rf-tab-wf").setAttribute("aria-selected", v === "wf");
-  draw();
-}
-q("rf-tab-spec").onclick = () => setView("spec");
-q("rf-tab-wf").onclick = () => setView("wf");
 
 // ── Escala vertical automática (rango fijo en múltiplos de 10 dB; se contrae tras ~3 s) ──
 let shrinkFrames = 0, rangeInit = false;
@@ -173,12 +163,11 @@ function autoScale() {
 
 // ── Estado del enlace (píldora) ─────────────────────────────────────────────
 function updatePill() {
-  const pill = q("signal-pill"), note = q("rf-note");
+  const pill = q("signal-pill");
   const streaming = wsState === "connected" && performance.now() - lastFrameAt < 2000;
   q("tab-rf-dot").className = "dot " + (streaming ? "ok" : wsState !== "connected" ? "bad" : "");
   if (wsState !== "connected") {
     pill.textContent = "MAIA DESCONECTADA"; pill.className = "pill warn";
-    if (window.RF_SERVER_URL) note.textContent = `Sin conexión con Maia (${window.RF_SERVER_URL}). Configura --maia-url o MAIA_SERVER_URL.`;
   } else if (!streaming) {
     pill.textContent = "ESPERANDO RF"; pill.className = "pill muted";
   } else {
@@ -190,29 +179,27 @@ function updatePill() {
 let lastPeakTxt = 0;
 function onSpectrum(buf) {
   if (buf.byteLength % 4) return;
-  const a = new Float32Array(buf); N = a.length; frames++; totalFrames++; lastFrameAt = performance.now();
+  const a = new Float32Array(buf); N = a.length; lastFrameAt = performance.now();
   q("rx-empty").style.display = "none";
   if (!smooth || smooth.length !== N) { smooth = Float32Array.from(a); peaks = Float32Array.from(a); }
-  const k = parseFloat(q("rx-avg").value);
+  const k = 0.5;
   for (let i = 0; i < N; i++) {
     smooth[i] = k * smooth[i] + (1 - k) * a[i];
     if (a[i] > peaks[i]) peaks[i] = a[i];
   }
-  if (q("rx-auto").checked) autoScale();
-  else { lo = parseFloat(q("rx-ymin").value); hi = parseFloat(q("rx-ymax").value); }
+  autoScale();
   pushWaterfallRow(a);
   draw();
   const now = performance.now();
   if (now - lastPeakTxt > 250) {
     lastPeakTxt = now;
     const pk = peakIndex(smooth), fpk = (cfg.freq - cfg.rate / 2 + pk / (N - 1) * cfg.rate) / 1e6;
-    q("rx-peak").textContent = fmtMHz(fpk) + " @ " + smooth[pk].toFixed(1) + " dB";
-    q("frames").textContent = totalFrames.toLocaleString("es-CL");
+    q("rx-peak-big").textContent = fpk.toFixed(4);
     updatePill();
   }
 }
 
-setInterval(() => { q("rx-fps").textContent = frames; frames = 0; updatePill(); }, 1000);
+setInterval(updatePill, 1000);
 
 // ── WebSocket hacia el servidor Flask (/ws/rf) ──────────────────────────────
 let lastWs = null;
@@ -237,17 +224,11 @@ function connect() {
 
 // ── Configuración del receptor (REST → AD9361) ──────────────────────────────
 function fillForm(c) {
-  q("rx-freq").value = (c.rx_lo_frequency / 1e6).toFixed(6);
-  q("rx-rate").value = (c.sampling_frequency / 1e6).toFixed(6);
-  q("rx-bw").value   = (c.rx_rf_bandwidth / 1e6).toFixed(6);
   q("rx-gain").value = Number(c.rx_gain).toFixed(1);
   q("rx-gmode").value = c.rx_gain_mode;
-  q("rx-gain").disabled = c.rx_gain_mode !== "Manual";
+  q("rx-gain").disabled = q("rx-gslider").disabled = c.rx_gain_mode !== "Manual";
+  q("rx-gslider").value = c.rx_gain;
   cfg.freq = c.rx_lo_frequency; cfg.rate = c.sampling_frequency; cfg.bw = c.rx_rf_bandwidth;
-  q("rx-m-fc").textContent = fmtHz(cfg.freq);
-  q("rx-m-span").textContent = fmtHz(cfg.rate);
-  q("rx-m-rbw").textContent = fmtHz(cfg.rate / (N || 4096));
-  q("spectrum-range").textContent = `${(cfg.freq / 1e6).toFixed(3)} MHz · span ${(cfg.rate / 1e6).toFixed(2)} MHz`;
   draw();
 }
 async function request(method, body) {
@@ -272,34 +253,23 @@ async function applyConfig(body) {
   } catch (e) { log(e.message); if (typeof toast === "function") toast(e.message); }
   finally { q("rx-apply").disabled = false; }
 }
-q("rx-apply").onclick = () => {
-  const f = parseFloat(q("rx-freq").value), s = parseFloat(q("rx-rate").value),
-        b = parseFloat(q("rx-bw").value),   g = parseFloat(q("rx-gain").value), mode = q("rx-gmode").value;
-  if ([f, s, b].some(isNaN) || (mode === "Manual" && isNaN(g))) { log("Verifica que los valores numéricos sean válidos."); return; }
-  const body = {rx_lo_frequency: Math.round(f * 1e6), sampling_frequency: Math.round(s * 1e6),
-                rx_rf_bandwidth: Math.round(b * 1e6), rx_gain_mode: mode};
+function applyGain() {
+  const mode = q("rx-gmode").value, g = parseFloat(q("rx-gain").value);
+  if (mode === "Manual" && isNaN(g)) { log("Ingresa una ganancia válida."); return; }
+  const body = {rx_gain_mode: mode};
   if (mode === "Manual") body.rx_gain = g;      // la ganancia solo se envía en modo manual
   applyConfig(body);
-};
-q("rx-presets").addEventListener("click", e => {
-  const b = e.target.closest("button[data-mhz]"); if (!b) return;
-  const mhz = parseFloat(b.dataset.mhz); q("rx-freq").value = mhz;
-  applyConfig({rx_lo_frequency: Math.round(mhz * 1e6)});
-});
-q("rx-gmode").onchange = () => { q("rx-gain").disabled = q("rx-gmode").value !== "Manual"; };
+}
+q("rx-apply").onclick = applyGain;
+q("rx-gslider").addEventListener("input", () => { q("rx-gain").value = Number(q("rx-gslider").value).toFixed(1); });
+q("rx-gslider").addEventListener("change", applyGain);
+q("rx-gain").addEventListener("input", () => { const v = parseFloat(q("rx-gain").value); if (!isNaN(v)) q("rx-gslider").value = v; });
+q("rx-gain").addEventListener("keydown", e => { if (e.key === "Enter") applyGain(); });
+q("rx-gmode").onchange = () => { q("rx-gain").disabled = q("rx-gslider").disabled = q("rx-gmode").value !== "Manual"; if (q("rx-gmode").value !== "Manual") applyGain(); };
 
 // ── Interacción con el espectro y el waterfall ──────────────────────────────
-q("rx-auto").onchange = () => { q("rx-manual").hidden = q("rx-auto").checked; rangeInit = false; };
-q("rx-hold").onchange = () => { if (smooth) peaks = Float32Array.from(smooth); draw(); };
-q("rx-marker").onchange = draw;
-
 function onMove(e) {
-  const r = e.currentTarget.getBoundingClientRect(); hoverX = e.clientX - r.left;
-  const x0 = PAD.l, x1 = r.width - PAD.r;
-  if (smooth && hoverX >= x0 && hoverX <= x1) {
-    const t = (hoverX - x0) / (x1 - x0), i = Math.min(N - 1, Math.max(0, Math.round(t * (N - 1))));
-    q("rx-cursor").textContent = fmtMHz((cfg.freq - cfg.rate / 2 + t * cfg.rate) / 1e6) + " @ " + smooth[i].toFixed(1) + " dB";
-  }
+  hoverX = e.clientX - e.currentTarget.getBoundingClientRect().left;
   draw();
 }
 function onDblClick(e) {
@@ -315,5 +285,15 @@ function onDblClick(e) {
 });
 addEventListener("resize", draw);
 
-loadConfig(); connect(); draw();
+// Diagnóstico visible: a qué dirección intenta conectarse el servidor y por qué falla.
+async function refreshLinkNote() {
+  try {
+    const s = await (await fetch("/api/rf/status")).json(), pill = q("signal-pill");
+    pill.title = !s.connected ? `Sin conexión con Maia en ${s.server_url}${s.error ? " — " + s.error : ""}. Verifica la IP de la Pluto (--pluto-ip) y el puerto 8000.`
+      : !s.streaming ? `Conectado a ${s.server_url}, pero no llegan frames de espectro${s.error ? " — " + s.error : ""}.` : `Maia en ${s.server_url}`;
+  } catch (_) {}
+}
+setInterval(refreshLinkNote, 3000);
+
+loadConfig(); connect(); draw(); refreshLinkNote();
 })();

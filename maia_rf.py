@@ -16,13 +16,14 @@ from urllib.parse import urlparse
 import requests
 import websocket
 
+DEFAULT_MAIA_URL = "http://192.168.2.1:8000"   # IP de fábrica de la Pluto (igual que MaiaView)
 STALE_AFTER_S = 2.0          # sin bloques por este tiempo => ya no se considera "streaming"
 CONFIG_POLL_S = 2.0
 
 
 class MaiaRFClient:
     def __init__(self, base_url: str | None = None):
-        self.base_url = (base_url or os.getenv("MAIA_SERVER_URL", "http://127.0.0.1:8000")).rstrip("/")
+        self.base_url = (base_url or os.getenv("MAIA_SERVER_URL", DEFAULT_MAIA_URL)).rstrip("/")
         parsed = urlparse(self.base_url)
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
         self.ws_url = f"{ws_scheme}://{parsed.netloc}/waterfall"
@@ -42,6 +43,15 @@ class MaiaRFClient:
         }
         self._cfg_thread = None
         self._subs: set[queue.Queue] = set()
+
+    def set_url(self, base_url: str):
+        """Cambia la dirección de Maia (antes de start())."""
+        base_url = base_url.strip().rstrip("/")
+        if "://" not in base_url:
+            base_url = "http://" + base_url
+        parsed = urlparse(base_url)
+        self.base_url = base_url
+        self.ws_url = f"{'wss' if parsed.scheme == 'https' else 'ws'}://{parsed.netloc}/waterfall"
 
     def start(self):
         with self._lock:
@@ -135,7 +145,7 @@ class MaiaRFClient:
                 )
                 with self._lock:
                     self._ws = ws
-                ws.run_forever(ping_interval=25, ping_timeout=10)
+                ws.run_forever()   # sin pings: como MaiaView, que conectaba bien con Maia
             except Exception as exc:
                 with self._lock:
                     self._state["error"] = str(exc)
@@ -145,6 +155,7 @@ class MaiaRFClient:
                 time.sleep(2)
 
     def _on_open(self, ws):
+        print(f"[Maia] WebSocket conectado: {self.ws_url}")
         with self._lock:
             self._state["connected"] = True
             self._state["error"] = None
@@ -159,6 +170,7 @@ class MaiaRFClient:
         self._broadcast(json.dumps({"type": "status", "ws": "disconnected"}))
 
     def _on_error(self, ws, error):
+        print(f"[Maia] error de WebSocket ({self.ws_url}): {error}")
         with self._lock:
             self._state["error"] = str(error)
             self._state["connected"] = False
