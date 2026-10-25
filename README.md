@@ -1,3 +1,16 @@
+# Comentarios de versión
+
+V6:
+- Cambio en la paleta de colores a una con mayor contraste
+- Simplificación de las interacciones para que se pueda manejar solo con mouse sin teclado
+- Aumento en el tamaño de la interfaz para una mejor visualización en pantalla de 7 pulgadas
+- Incorporación de mejoras basadas en Satdump
+
+V5: 
+- Se separó la interfaz en 3 pestañas para visualizar en pantalla de 7 pulgadas. 
+- Se incorpora conexión real a pluto y se añade el script ```mock_maia.py``` que permite simular una pluto de forma externa.
+- Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
+
 # SATTRACK (simulación + monitor RF Maia)
 
 Aplicación web única para seleccionar un satélite del catálogo orbital, elegir una bajada de banda S, iniciar el próximo pase y observar el seguimiento y la recepción simulados. Combina el flujo del selector de satélites con las vistas de seguimiento y espectro de MaiaView. Los proyectos originales permanecen separados.
