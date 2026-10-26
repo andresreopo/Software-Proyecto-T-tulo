@@ -1,5 +1,8 @@
 # Comentarios de versión
 
+V7:
+- Aumento de tamaño de fuentes
+
 V6:
 - Cambio en la paleta de colores a una con mayor contraste
 - Simplificación de las interacciones para que se pueda manejar solo con mouse sin teclado

@@ -25,7 +25,7 @@ const fmtDur = s => {
 function buildTicks() {
   const key = rotor.elMin + "/" + rotor.elMax; if (key === tickKey) return; tickKey = key;
   const sc = q("el-scale"); sc.querySelectorAll(".el-tick").forEach(t => t.remove());
-  const step = (rotor.elMax - rotor.elMin) > 90 ? 30 : 15;
+  const step = 30;
   for (let v = rotor.elMin; v <= rotor.elMax + 1e-6; v += step) {
     const t = document.createElement("div"); t.className = "el-tick";
     t.style.bottom = ((v - rotor.elMin) / (rotor.elMax - rotor.elMin) * 100) + "%"; t.textContent = v + "°";

@@ -184,7 +184,7 @@ function renderState(state) {
   stateAt = performance.now();
   if (sessionId && pathSession !== sessionId) loadPath(sessionId);
   const geo = state.geometry, rotor = state.rotor, rf = state.receiver;
-  $("tracking-title").textContent = `${state.name} · #${state.norad_id}`;
+  $("tracking-title").textContent = state.name;
   $("sim-time").textContent = longTime(state.sim_time_chile) + ` · ${state.speed}×`;
   const phase = $("phase"); phase.textContent = state.phase.toUpperCase(); phase.className = "pill " + (state.phase === "en pase" ? "" : state.phase === "finalizado" ? "warn" : "muted");
   $("pass-progress").style.width = `${Math.round(state.progress * 100)}%`;
@@ -232,13 +232,13 @@ function drawSky() {
   ctx.beginPath();
   for (let a = 0; a < 180; a += 45) { const r = a * Math.PI / 180; ctx.moveTo(cx - radius * Math.sin(r), cy + radius * Math.cos(r)); ctx.lineTo(cx + radius * Math.sin(r), cy - radius * Math.cos(r)); }
   ctx.stroke();
-  ctx.fillStyle = "#799bb0"; ctx.font = `9px ${mono}`; ctx.textAlign = "left";
+  ctx.fillStyle = "#799bb0"; ctx.font = `16px ${mono}`; ctx.textAlign = "left";
   ctx.fillText("30°", cx + 3, cy - radius * 2/3 + 10); ctx.fillText("60°", cx + 3, cy - radius / 3 + 10);
-  ctx.fillStyle = "#2b4e60"; ctx.font = `700 11px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#2b4e60"; ctx.font = `700 16px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillText("N", cx, cy - radius - 9); ctx.fillText("S", cx, cy + radius + 9); ctx.fillText("E", cx + radius + 9, cy); ctx.fillText("O", cx - radius - 9, cy);
   ctx.textBaseline = "alphabetic";
   if (!latest) {
-    ctx.fillStyle = "#5e7b8f"; ctx.font = `12px ${mono}`; ctx.textAlign = "center"; ctx.fillText("Inicia una sesión", cx, cy + 4);
+    ctx.fillStyle = "#5e7b8f"; ctx.font = `16px ${mono}`; ctx.textAlign = "center"; ctx.fillText("Inicia una sesión", cx, cy + 4);
     return;
   }
   // Trayectoria completa del pase (tenue) y tramo ya recorrido (brillante)
@@ -252,7 +252,7 @@ function drawSky() {
     line(pts, "#1284a866", 1.6, [5, 4]);
     for (const [i, name] of [[0, "AOS"], [pts.length - 1, "LOS"]]) {
       const [x, y] = skyPoint(pts[i].az, Math.max(0, pts[i].el), cx, cy, radius);
-      dot(ctx, x, y, 3, "#395d70"); ctx.fillStyle = "#395d70"; ctx.font = `600 9px ${mono}`; ctx.textAlign = "center";
+      dot(ctx, x, y, 3, "#395d70"); ctx.fillStyle = "#395d70"; ctx.font = `600 16px ${mono}`; ctx.textAlign = "center";
       ctx.fillText(name, Math.max(14, Math.min(w - 14, x)), y + (y < cy ? -7 : 14));
     }
   }
@@ -264,17 +264,17 @@ function drawSky() {
 
   // Lectura en tiempo real (esquina superior izquierda) y cuenta atrás
   ctx.textAlign = "left";
-  ctx.fillStyle = "#5e7e90"; ctx.font = `700 10px ${mono}`; ctx.fillText("AZIMUT", 4, 14); ctx.fillText("ELEVACIÓN", 4, 58);
-  ctx.fillStyle = "#061319"; ctx.font = `700 24px ${mono}`; ctx.fillText(g.az_deg.toFixed(1) + "°", 4, 38);
-  ctx.fillStyle = up ? "#61a119" : "#061319"; ctx.fillText(g.el_deg.toFixed(1) + "°", 4, 82);
+  ctx.fillStyle = "#5e7e90"; ctx.font = `700 16px ${mono}`; ctx.fillText("AZIMUT", 4, 16); ctx.fillText("ELEVACIÓN", 4, 76);
+  ctx.fillStyle = "#061319"; ctx.font = `700 28px ${mono}`; ctx.fillText(g.az_deg.toFixed(1) + "°", 4, 46);
+  ctx.fillStyle = up ? "#61a119" : "#061319"; ctx.fillText(g.el_deg.toFixed(1) + "°", 4, 106);
   const t = simNow(), aos = utcMs(latest.pass.aos_utc), los = utcMs(latest.pass.los_utc);
   let label, secs, color;
   if (t < aos) { label = "AOS en"; secs = (aos - t) / 1000; color = "#935500"; }
   else if (t < los) { label = "LOS en"; secs = (los - t) / 1000; color = "#61a119"; }
   else { label = "PASE TERMINADO"; secs = null; color = "#395d70"; }
-  ctx.fillStyle = "#5e7e90"; ctx.font = `700 10px ${mono}`; ctx.fillText(label.toUpperCase(), 4, 106);
-  if (secs !== null) { ctx.fillStyle = color; ctx.font = `700 22px ${mono}`; ctx.fillText(clock(secs), 4, 129); }
-  ctx.fillStyle = "#5e7e90"; ctx.font = `10px ${mono}`;
+  ctx.fillStyle = "#5e7e90"; ctx.font = `700 16px ${mono}`; ctx.fillText(label.toUpperCase(), 4, 136);
+  if (secs !== null) { ctx.fillStyle = color; ctx.font = `700 28px ${mono}`; ctx.fillText(clock(secs), 4, 164); }
+  ctx.fillStyle = "#5e7e90"; ctx.font = `16px ${mono}`;
   ctx.fillStyle = "#61a119"; ctx.fillText("● satélite", 4, h - 20); ctx.fillStyle = "#935500"; ctx.fillText("● rotor", 4, h - 7);
 }
 function drawAll(){ if ($("panel-track").hidden) return; drawSky(); }

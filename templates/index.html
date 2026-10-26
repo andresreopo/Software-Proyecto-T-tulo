@@ -85,7 +85,7 @@
       <section class="tab-panel" id="panel-track" role="tabpanel" aria-labelledby="tab-track" hidden>
         <div class="track-grid">
           <section class="card radar-card">
-            <div class="card-top radar-top"><div><div class="section-kicker">SEGUIMIENTO ORBITAL</div><h2 id="tracking-title">Esperando una sesión</h2></div><div class="controls"><span id="phase" class="pill muted">EN ESPERA</span><button id="pause-session" class="button secondary" disabled>Pausar</button><button id="stop-session" class="button ghost" disabled>Detener</button></div></div>
+            <div class="card-top radar-top"><div><div class="section-kicker">SEGUIMIENTO</div><h2 id="tracking-title">Esperando una sesión</h2></div><div class="controls"><span id="phase" class="pill muted">EN ESPERA</span><button id="pause-session" class="button secondary" disabled>Pausar</button><button id="stop-session" class="button ghost" disabled>Detener</button></div></div>
             <div class="radar-row">
               <div class="radar-wrap"><canvas id="sky-canvas" aria-label="Radar orbital: trayectoria, azimut y elevación"></canvas></div>
               <aside class="el-bar" aria-label="Elevación">
@@ -95,14 +95,14 @@
                   <div class="el-mark tgt" id="el-tgt" hidden><span id="el-tgt-v"></span></div>
                   <div class="el-mark cur" id="el-cur" hidden><span id="el-cur-v"></span></div>
                 </div>
-                <div class="el-legend"><div><span class="c">▬</span> Act. <b id="el-leg-c">—</b></div><div><span class="t">╌</span> Obj. <b id="el-leg-t">—</b></div></div>
+                <div class="el-legend" hidden><b id="el-leg-c">—</b><b id="el-leg-t">—</b></div>
               </aside>
             </div>
             <div class="sim-time-row"><span>SIM</span><strong id="sim-time">—</strong></div>
             <div class="progress-track"><div id="pass-progress"></div></div>
           </section>
           <section class="card link-card">
-            <div class="card-top"><div><div class="section-kicker">TRACKER · ESP32</div><h2>Puerto serial</h2></div><span id="rot-pill" class="pill muted">DESCONECTADO</span></div>
+            <div class="card-top"><div><div class="section-kicker">TRACKER · ESP32</div></div><span id="rot-pill" class="pill muted">DESCONECTADO</span></div>
             <div class="link-controls">
               <label class="rotor-field">Puerto COM
                 <span class="rotor-port-row"><select id="rot-port"></select><button type="button" class="button ghost" id="rot-refresh" title="Buscar puertos" aria-label="Buscar puertos">↻</button></span>
@@ -145,7 +145,6 @@
                 </label>
                 <label>Ganancia <span>dB</span><input id="rx-gain" type="number" step="any"></label>
                 <input id="rx-gslider" class="rf-slider" type="range" min="0" max="73" step="1" value="50" aria-label="Ganancia (deslizador)">
-                <button id="rx-apply" type="button" class="button secondary full">Aplicar</button>
               </div>
             </div>
           </div>

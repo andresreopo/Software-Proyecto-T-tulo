@@ -18,7 +18,7 @@ let N = 0;
 let smooth = null, peaks = null;
 let lo = -120, hi = -20;
 let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
-const PAD = {l: 46, r: 10, t: 10, b: 24};
+const PAD = {l: 60, r: 24, t: 10, b: 28};
 
 // ── Mapa de color del waterfall ─────────────────────────────────────────────
 const LUT = (() => {
@@ -56,7 +56,7 @@ function prep(c, ctx, bottom = PAD.b) {
 function freqAxis(ctx, g, gridColor, labels) {
   const f0 = (cfg.freq - cfg.rate / 2) / 1e6, f1 = (cfg.freq + cfg.rate / 2) / 1e6;
   const sx = niceStep(f1 - f0, 5);
-  ctx.font = "10px " + css("--mono"); ctx.fillStyle = css("--muted");
+  ctx.font = "16px " + css("--mono"); ctx.fillStyle = css("--muted");
   ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
   ctx.textAlign = "center"; ctx.textBaseline = "top";
   for (let f = Math.ceil(f0 / sx) * sx; f <= f1; f += sx) {
@@ -78,8 +78,8 @@ function drawSpectrum() {
   if (!cfg.rate) return;
   const border = css("--line");
   const Y = v => g.y1 - (v - lo) / (hi - lo) * (g.y1 - g.y0);
-  const sy = niceStep(hi - lo, 5);
-  sctx.font = "10px " + css("--mono"); sctx.fillStyle = css("--muted");
+  const sy = niceStep(hi - lo, 4);
+  sctx.font = "16px " + css("--mono"); sctx.fillStyle = css("--muted");
   sctx.strokeStyle = border; sctx.lineWidth = 1;
   sctx.textAlign = "right"; sctx.textBaseline = "middle";
   for (let v = Math.ceil(lo / sy) * sy; v <= hi; v += sy) {
@@ -134,7 +134,7 @@ function drawWaterfall() {
   wctx.drawImage(wfBuf, 0, 0, wfBuf.width, wfBuf.height, g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
   freqAxis(wctx, g, "rgba(148,163,184,.22)", true);
   wctx.strokeStyle = css("--line"); wctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
-  wctx.fillStyle = css("--muted"); wctx.font = "10px " + css("--mono"); wctx.textAlign = "right";
+  wctx.fillStyle = css("--muted"); wctx.font = "16px " + css("--mono"); wctx.textAlign = "right";
   wctx.textBaseline = "top";    wctx.fillText("ahora", g.x0 - 5, g.y0);
   wctx.textBaseline = "bottom"; wctx.fillText("antes", g.x0 - 5, g.y1);
   hoverLine(wctx, g);
@@ -244,14 +244,12 @@ async function loadConfig() {
   catch (e) { log(e.message); }
 }
 async function applyConfig(body) {
-  q("rx-apply").disabled = true;
   try {
     fillForm(await request("PATCH", body));
     if (smooth) peaks = Float32Array.from(smooth);
     rangeInit = false;
     log("Configuración aplicada: Fc " + fmtHz(cfg.freq) + ", SR " + fmtHz(cfg.rate));
-  } catch (e) { log(e.message); if (typeof toast === "function") toast(e.message); }
-  finally { q("rx-apply").disabled = false; }
+  } catch (e) { log(e.message); if (typeof toast === "function") toast(e.message); loadConfig(); }
 }
 function applyGain() {
   const mode = q("rx-gmode").value, g = parseFloat(q("rx-gain").value);
@@ -260,12 +258,12 @@ function applyGain() {
   if (mode === "Manual") body.rx_gain = g;      // la ganancia solo se envía en modo manual
   applyConfig(body);
 }
-q("rx-apply").onclick = applyGain;
 q("rx-gslider").addEventListener("input", () => { q("rx-gain").value = Number(q("rx-gslider").value).toFixed(1); });
 q("rx-gslider").addEventListener("change", applyGain);
 q("rx-gain").addEventListener("input", () => { const v = parseFloat(q("rx-gain").value); if (!isNaN(v)) q("rx-gslider").value = v; });
-q("rx-gain").addEventListener("keydown", e => { if (e.key === "Enter") applyGain(); });
-q("rx-gmode").onchange = () => { q("rx-gain").disabled = q("rx-gslider").disabled = q("rx-gmode").value !== "Manual"; if (q("rx-gmode").value !== "Manual") applyGain(); };
+q("rx-gain").addEventListener("keydown", e => { if (e.key === "Enter") e.target.blur(); });
+q("rx-gain").addEventListener("change", applyGain);
+q("rx-gmode").onchange = () => { q("rx-gain").disabled = q("rx-gslider").disabled = q("rx-gmode").value !== "Manual"; applyGain(); };
 
 // ── Interacción con el espectro y el waterfall ──────────────────────────────
 function onMove(e) {
