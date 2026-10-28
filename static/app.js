@@ -259,7 +259,7 @@ function drawSky() {
   line(trail.map(p => ({az: p.az, el: p.el})), "#1284a8", 2.2);
   const g = latest.geometry, up = g.el_deg >= 0;
   const [rx, ry] = skyPoint(latest.rotor.az_deg, latest.rotor.el_deg, cx, cy, radius);
-  dot(ctx, rx, ry, 4, "#935500");
+  dot(ctx, rx, ry, 7, "#935500"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke();
   if (up) { const [sx, sy] = skyPoint(g.az_deg, g.el_deg, cx, cy, radius); dot(ctx, sx, sy, 7, "#61a119"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke(); }
 
   // Lectura en tiempo real (esquina superior izquierda) y cuenta atrás

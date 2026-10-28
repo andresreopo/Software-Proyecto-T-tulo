@@ -43,6 +43,9 @@ function niceStep(range, target) {
   const raw = range / target, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
 }
+const fmtDb = (v, sy) => { const a = Math.abs(v);
+  return a >= 1e6 ? trimZeros(v / 1e6, 2) + "M" : a >= 1e4 ? trimZeros(v / 1e3, 1) + "k" : sy < 1 ? v.toFixed(1) : v.toFixed(0); };
+const trimZeros = (v, d) => v.toFixed(d).replace(/\.?0+$/, "");
 const fmtMHz = v => v.toFixed(4) + " MHz";
 const fmtHz = v => v >= 1e6 ? (v / 1e6).toFixed(3) + " MHz" : v >= 1e3 ? (v / 1e3).toFixed(2) + " kHz" : v.toFixed(0) + " Hz";
 
@@ -74,6 +77,12 @@ function peakIndex(a) { let k = 0; for (let i = 1; i < a.length; i++) if (a[i] >
 
 // ── Espectro ────────────────────────────────────────────────────────────────
 function drawSpectrum() {
+  // El margen izquierdo se ajusta al ancho de las etiquetas para que el número siempre quepa.
+  if (cfg.rate && hi > lo) {
+    const sy0 = niceStep(hi - lo, 4); sctx.font = "16px " + css("--mono");
+    const wmax = Math.max(sctx.measureText(fmtDb(lo, sy0)).width, sctx.measureText(fmtDb(hi, sy0)).width);
+    PAD.l = Math.max(60, Math.ceil(wmax) + 14);
+  }
   const g = prep(specC, sctx, 4);
   if (!cfg.rate) return;
   const border = css("--line");
@@ -85,7 +94,7 @@ function drawSpectrum() {
   for (let v = Math.ceil(lo / sy) * sy; v <= hi; v += sy) {
     const y = Math.round(Y(v)) + .5;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke();
-    sctx.fillText(v.toFixed(0), g.x0 - 6, y);
+    sctx.fillText(fmtDb(v, sy), g.x0 - 6, y);
   }
   freqAxis(sctx, g, border, false);
   sctx.strokeStyle = border; sctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
@@ -194,7 +203,7 @@ function onSpectrum(buf) {
   if (now - lastPeakTxt > 250) {
     lastPeakTxt = now;
     const pk = peakIndex(smooth), fpk = (cfg.freq - cfg.rate / 2 + pk / (N - 1) * cfg.rate) / 1e6;
-    q("rx-peak-big").textContent = fpk.toFixed(4);
+    q("rx-peak-big").textContent = trimZeros(fpk, 4);
     updatePill();
   }
 }
@@ -228,6 +237,10 @@ function fillForm(c) {
   q("rx-gmode").value = c.rx_gain_mode;
   q("rx-gain").disabled = q("rx-gslider").disabled = c.rx_gain_mode !== "Manual";
   q("rx-gslider").value = c.rx_gain;
+  q("rx-sr").value = trimZeros(c.sampling_frequency / 1e6, 3);
+  q("rx-sslider").value = c.sampling_frequency / 1e6;
+  q("rx-bw").value = trimZeros(c.rx_rf_bandwidth / 1e6, 3);
+  q("rx-bslider").value = c.rx_rf_bandwidth / 1e6;
   cfg.freq = c.rx_lo_frequency; cfg.rate = c.sampling_frequency; cfg.bw = c.rx_rf_bandwidth;
   draw();
 }
@@ -264,6 +277,18 @@ q("rx-gain").addEventListener("input", () => { const v = parseFloat(q("rx-gain")
 q("rx-gain").addEventListener("keydown", e => { if (e.key === "Enter") e.target.blur(); });
 q("rx-gain").addEventListener("change", applyGain);
 q("rx-gmode").onchange = () => { q("rx-gain").disabled = q("rx-gslider").disabled = q("rx-gmode").value !== "Manual"; applyGain(); };
+
+// Muestreo y ancho de banda (MHz en la interfaz, Hz hacia el AD9361)
+function bindMHz(key, num, sld) {
+  const send = () => { const v = parseFloat(q(num).value); if (isNaN(v) || v <= 0) { loadConfig(); return; } applyConfig({[key]: Math.round(v * 1e6)}); };
+  q(sld).addEventListener("input", () => { q(num).value = trimZeros(Number(q(sld).value), 3); });
+  q(sld).addEventListener("change", send);
+  q(num).addEventListener("input", () => { const v = parseFloat(q(num).value); if (!isNaN(v)) q(sld).value = v; });
+  q(num).addEventListener("keydown", e => { if (e.key === "Enter") e.target.blur(); });
+  q(num).addEventListener("change", send);
+}
+bindMHz("sampling_frequency", "rx-sr", "rx-sslider");
+bindMHz("rx_rf_bandwidth", "rx-bw", "rx-bslider");
 
 // ── Interacción con el espectro y el waterfall ──────────────────────────────
 function onMove(e) {

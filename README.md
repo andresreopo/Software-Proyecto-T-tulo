@@ -1,5 +1,10 @@
 # Comentarios de versión
 
+V8: 
+- Ancho de banda y muestreo editables
+- Aumento de tamaño en elementos de interfaz
+- Adaptación automática de rangos de potencia recibida en Monitor RF
+
 V7:
 - Aumento de tamaño de fuentes
 
