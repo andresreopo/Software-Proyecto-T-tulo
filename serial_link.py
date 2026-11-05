@@ -10,6 +10,7 @@ Protocolo (texto, una línea por mensaje terminada en \\n, 115200 baud por defec
                    en °/s (vaz > 0 = azimut creciente). Se envía a ~5 Hz; la ESP32 debe
                    extrapolar con la velocidad entre mensajes y detenerse si dejan de llegar.
   ESP32 → PC    :  POS,<az>,<el>     posición actual, ~5 Hz,       POS,121.80,44.10
+  ESP32 → PC    :  BAT,<volts>       voltaje de la batería en V, ~1 Hz,   BAT,12.63
   ESP32 → PC    :  cualquier otra línea se muestra en el registro de la interfaz
                    ("ACK" se ignora; úsala para confirmar un SET).
 
@@ -47,11 +48,17 @@ def list_ports() -> list[dict]:
 
 
 def parse_line(text: str):
-    """'POS,12.3,45.6' → ("pos", (az, el)); otro texto → ("msg", texto); vacío → None."""
+    """'POS,12.3,45.6' → ("pos", (az, el)); 'BAT,12.6' → ("bat", volts); otro texto → ("msg", texto); vacío → None."""
     text = text.strip()
     if not text:
         return None
     parts = [p.strip() for p in text.split(",")]
+    if parts[0].upper() == "BAT" and len(parts) == 2:
+        try:
+            volts = float(parts[1])
+        except ValueError:
+            return ("msg", text)
+        return ("bat", volts) if math.isfinite(volts) and volts >= 0 else ("msg", text)
     if parts[0].upper() == "POS" and len(parts) == 3:
         try:
             az, el = float(parts[1]), float(parts[2])
@@ -102,6 +109,7 @@ class SimPort:
         self._t = time.monotonic()
         self._q: queue.Queue = queue.Queue()
         self.is_open = True
+        self._bat_t = 0.0
         self._q.put(b"# ESP32 simulada lista\n")
 
     def write(self, data: bytes) -> int:
@@ -148,6 +156,10 @@ class SimPort:
             return self._q.get(timeout=self.PERIOD)
         except queue.Empty:
             self._step()
+            now = time.monotonic()
+            if now - self._bat_t >= 1.0:                   # batería simulada ~12.6 V con una ligera oscilación
+                self._bat_t = now
+                self._q.put(f"BAT,{12.6 + 0.05 * math.sin(now / 5.0):.2f}\n".encode())
             return f"POS,{self.az:.2f},{self.el:.2f}\n".encode()
 
     def close(self):
@@ -178,11 +190,14 @@ class SerialLink:
         self._error = None
         self._az = self._el = None
         self._pos_ts = None
+        self._bat = None                    # último voltaje de batería (V)
+        self._bat_ts = None
         self._tgt = (None, None)
 
     def state(self) -> dict:
         with self._lock:
             age = None if self._pos_ts is None else time.monotonic() - self._pos_ts
+            bat_age = None if self._bat_ts is None else time.monotonic() - self._bat_ts
             return {
                 "connected": self._connected, "port": self._port, "baud": self._baud,
                 "sim": self._port == SIM_PORT, "error": self._error,
@@ -190,6 +205,7 @@ class SerialLink:
                 "tgt_az": self._tgt[0], "tgt_el": self._tgt[1],
                 "el_min": config.ROTOR_EL_MIN, "el_max": config.ROTOR_EL_MAX,
                 "stale_s": config.SERIAL_STALE_S,
+                "bat_v": self._bat, "bat_age": bat_age, "bat_stale_s": config.BAT_STALE_S,
             }
 
     def _emit(self, extra: Optional[dict] = None):
@@ -341,6 +357,11 @@ class SerialLink:
             with self._lock:
                 self._az, self._el = val
                 self._pos_ts = time.monotonic()
+            self._emit()
+        elif kind == "bat":
+            with self._lock:
+                self._bat = val
+                self._bat_ts = time.monotonic()
             self._emit()
         elif val.upper() != "ACK":
             now = time.monotonic()

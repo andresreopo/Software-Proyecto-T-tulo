@@ -8,6 +8,7 @@
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   <script src="{{ url_for('static', filename='rf.js') }}" defer></script>
   <script src="{{ url_for('static', filename='rotor.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='gps.js') }}" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -20,6 +21,10 @@
         <button type="button" class="tabbtn" role="tab" id="tab-rf" data-tab="rf" aria-controls="panel-rf" aria-selected="false"><b>3</b><span>Monitor RF</span><i id="tab-rf-dot" class="dot" aria-hidden="true"></i></button>
       </nav>
       <span id="source-indicator" class="tag source-tag">Cargando catálogo…</span>
+      <span id="bat-top" class="bat-top off" title="Voltaje de la batería (ESP32)">
+        <svg viewBox="0 0 24 12" width="22" height="11" aria-hidden="true"><rect x="1" y="1" width="19" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="21" y="4" width="2.5" height="4" rx="1" fill="currentColor"/></svg>
+        <b id="bat-top-v">—</b>
+      </span>
       <time id="clock" class="clock"></time>
     </header>
 
@@ -30,6 +35,14 @@
           <div class="select-col select-left">
         <section class="card observer-card">
           <div class="card-title"><span class="step">01</span><div><h2>Estación de observación</h2><p>Punto de referencia para todos los pases</p></div></div>
+          <div class="obs-mode">
+            <select id="obs-mode" aria-label="Origen de la posición de la estación">
+              <option value="auto">Automática (GPS)</option>
+              <option value="manual">Manual</option>
+            </select>
+            <span id="gps-pill" class="pill muted" role="status">GPS…</span>
+          </div>
+          <p class="rotor-hint" id="gps-hint" hidden></p>
           <div class="field-grid">
             <label>Latitud <span>°</span><input id="lat" type="number" step="0.0001" value="-33.4489"></label>
             <label>Longitud <span>°</span><input id="lon" type="number" step="0.0001" value="-70.6693"></label>
@@ -112,7 +125,7 @@
             </div>
             <p class="rotor-hint" id="rot-status">Desconectado.</p>
             <div class="console-head"><span>CONSOLA</span>
-              <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK</label>
+              <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK/BAT</label>
               <button type="button" class="button ghost" id="con-pause">Pausar</button>
               <button type="button" class="button ghost" id="con-clear">Limpiar</button></div>
             <div id="serial-console" class="serial-console" role="log" aria-live="off"></div>

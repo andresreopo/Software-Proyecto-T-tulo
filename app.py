@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import queue
 import threading
 
 from flask import Flask, jsonify, render_template, request, Response
 from flask_sock import Sock
 
+import gps_config
 from catalog import store
+from gps_link import gps
 from orbit import UTC, find_passes, position
 from simulation import SimulationSession, sessions
 from map_plot import render_map_base_png, render_map_overlay_png, observer_fraction
@@ -48,12 +51,24 @@ rotor = SerialLink(on_event=_rotor_broadcast)
 follower = RotorFollower(rotor, on_event=_rotor_broadcast)
 
 
+DEFAULT_OBSERVER = (-33.4489, -70.6693, 570.0)     # Santiago; respaldo si no hay GPS ni valores
+
+
+def _default_observer():
+    """Lo que se usa cuando una petición no trae lat/lon/alt: posición del GPS si hay fix; si no, Santiago."""
+    fix = gps.fix()
+    if fix is None:
+        return DEFAULT_OBSERVER
+    return fix["lat"], fix["lon"], fix["alt_m"] if fix["alt_m"] is not None else DEFAULT_OBSERVER[2]
+
+
 def observer_from(values):
+    d_lat, d_lon, d_alt = _default_observer()
     try:
         observer = {
-            "lat": float(values.get("lat", -33.4489)),
-            "lon": float(values.get("lon", -70.6693)),
-            "alt_m": float(values.get("alt_m", 570)),
+            "lat": float(values.get("lat", d_lat)),
+            "lon": float(values.get("lon", d_lon)),
+            "alt_m": float(values.get("alt_m", d_alt)),
             "min_el": float(values.get("min_el", 10)),
         }
     except (TypeError, ValueError) as exc:
@@ -84,7 +99,13 @@ def status():
                         "frames_received": rf["frames_received"], "error": rf["error"],
                         "maia_status": rf["maia_status"], "server_url": maia_rf.base_url,
                         "center_freq_hz": rf["center_freq_hz"], "span_hz": rf["span_hz"]
-                    }, "catalog": store.status()})
+                    }, "gps": gps.state(), "catalog": store.status()})
+
+
+@app.get("/api/gps")
+def gps_state():
+    """Estado del GPS: la interfaz lo consulta y, en modo automático, copia lat/lon/alt a la estación."""
+    return jsonify({"ok": True, **gps.state()})
 
 
 @app.post("/api/catalog/refresh")
@@ -372,9 +393,19 @@ def _num(body, key, label):
     return v
 
 
+def _gps_port_in_use(port):
+    """True si `port` es la UART que ya tiene abierta el GPS (el simulador "sim" no ocupa ningún puerto real)."""
+    in_use = gps.port()
+    return bool(in_use) and in_use != "sim" and port == in_use
+
+
 @app.get("/api/serial/ports")
 def serial_ports():
-    return jsonify({"ok": True, "ports": list_ports()})
+    ports = list_ports()
+    for p in ports:
+        if _gps_port_in_use(p["device"]):
+            p["description"] += " — en uso por el GPS"
+    return jsonify({"ok": True, "ports": ports})
 
 
 @app.post("/api/serial/connect")
@@ -383,6 +414,8 @@ def serial_connect():
     port = str(body.get("port") or "").strip()
     if not port:
         return error("Elige un puerto serial.")
+    if _gps_port_in_use(port):
+        return error(f"{port} lo está usando el GPS; elige el puerto de la ESP32.")
     if port not in {p["device"] for p in list_ports()}:     # solo puertos que el sistema lista (o "sim")
         return error("Puerto no disponible: pulsa ↻ para actualizar la lista.")
     follower.stop(hold=False)
@@ -465,7 +498,21 @@ if __name__ == "__main__":
                              "También: variable MAIA_SERVER_URL")
     parser.add_argument("--serial-port", help="Puerto serial de la ESP32 a abrir al iniciar (COM5, /dev/ttyUSB0 o sim)")
     parser.add_argument("--serial-baud", type=int, default=rotor_config.SERIAL_BAUD)
+    parser.add_argument("--gps-port", default=os.getenv("SATTRACK_GPS_PORT"),
+                        help=f"Puerto serial del GPS (por defecto {gps_config.GPS_PORT} si existe; sim = GPS simulado). "
+                             "También: variable SATTRACK_GPS_PORT")
+    parser.add_argument("--gps-baud", type=int, default=gps_config.GPS_BAUD)
+    parser.add_argument("--no-gps", action="store_true", help="No usar GPS: la posición de la estación es solo manual")
     args = parser.parse_args()
+    if not args.no_gps:
+        gps_port = args.gps_port or (gps_config.GPS_PORT if os.path.exists(gps_config.GPS_PORT) else None)
+        if gps_port:
+            if gps_port == args.serial_port:
+                parser.error("--gps-port y --serial-port no pueden ser el mismo puerto")
+            gps.start(gps_port, args.gps_baud)
+            print(f"[SATTRACK] GPS leyendo {gps_port} ({args.gps_baud} baud): la estación se ajusta sola al tener fix")
+        else:
+            print(f"[SATTRACK] GPS desactivado: no existe {gps_config.GPS_PORT} (usa --gps-port). Posición manual.")
     if args.serial_port:
         try:
             rotor.connect(args.serial_port, args.serial_baud)

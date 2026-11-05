@@ -15,3 +15,4 @@ ROTOR_MAX_RATE_AZ = 12.0
 ROTOR_MAX_RATE_EL = 6.0
 
 TRACK_RATE_HZ = 5.0       # frecuencia con que se envían las referencias TRK
+BAT_STALE_S    = 5.0      # sin "BAT" durante este tiempo → voltaje obsoleto (la ESP32 lo envía cada 1 s)

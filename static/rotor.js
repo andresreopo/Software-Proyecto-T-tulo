@@ -11,9 +11,9 @@ const getLatest = () => (typeof latest !== "undefined" ? latest : null);      //
 const getSession = () => (typeof sessionId !== "undefined" ? sessionId : null);
 
 let rotor = {connected: false, port: null, baud: null, az: null, el: null, tgtAz: null, tgtEl: null,
-             error: null, sim: false, elMin: 0, elMax: 90, staleMs: 2000};
+             error: null, sim: false, elMin: 0, elMax: 90, staleMs: 2000, bat: null, batStaleMs: 5000};
 let follow = {status: "idle"};
-let rotorAt = null, lastErr = null, drawPending = false, tickKey = "";
+let rotorAt = null, batAt = null, lastErr = null, drawPending = false, tickKey = "";
 const isStale = () => rotorAt === null || performance.now() - rotorAt > rotor.staleMs;
 const wrap180 = d => ((d + 540) % 360) - 180;
 const fmtDur = s => {
@@ -56,6 +56,11 @@ function updateUI() {
   q("rm-tgt").textContent = rotor.tgtAz !== null ? "az " + rotor.tgtAz.toFixed(1) + "° · el " + rotor.tgtEl.toFixed(1) + "°" : "—";
   q("rm-err").textContent = live && rotor.tgtAz !== null
     ? "Δaz " + wrap180(rotor.tgtAz - rotor.az).toFixed(1) + "° · Δel " + (rotor.tgtEl - rotor.el).toFixed(1) + "°" : "—";
+
+  const batOn = rotor.connected && rotor.bat !== null, batStale = batAt === null || performance.now() - batAt > rotor.batStaleMs;
+  q("bat-top-v").textContent = batOn ? rotor.bat.toFixed(2) + " V" : "—";   // solo voltaje, sin porcentaje
+  q("bat-top").classList.toggle("off", !batOn);                              // sin rotor/dato: atenuado
+  q("bat-top").classList.toggle("stale", batOn && batStale);                // dato viejo: más atenuado
 
   const pill = q("rot-pill");
   pill.textContent = !rotor.connected ? "DESCONECTADO" : rotor.sim ? "SIMULADOR" : "CONECTADO";
@@ -102,7 +107,7 @@ function schedule() {
 // ── Consola serial (TX/RX) ──────────────────────────────────────────────────
 const con = q("serial-console"); let conPaused = false, conBuf = [];
 function conLine(kind, text) {
-  if (kind !== "sys" && !q("con-poll").checked && /^(POS|TRK)\b/.test(text)) return;
+  if (kind !== "sys" && !q("con-poll").checked && /^(POS|TRK|BAT)\b/.test(text)) return;
   if (conPaused) { conBuf.push([kind, text]); if (conBuf.length > 1000) conBuf.shift(); return; }
   const row = document.createElement("div"); row.className = "con-" + kind;
   const tm = new Date(), p = n => String(n).padStart(2, "0");
@@ -122,7 +127,9 @@ q("con-pause").onclick = () => {
 function applyRotor(m) {
   const was = rotor.connected;
   rotor = {connected: m.connected, port: m.port, baud: m.baud, az: m.az, el: m.el, tgtAz: m.tgt_az, tgtEl: m.tgt_el,
-           error: m.error, sim: m.sim, elMin: m.el_min ?? 0, elMax: m.el_max ?? 90, staleMs: (m.stale_s ?? 2) * 1000};
+           error: m.error, sim: m.sim, elMin: m.el_min ?? 0, elMax: m.el_max ?? 90, staleMs: (m.stale_s ?? 2) * 1000,
+           bat: m.bat_v ?? null, batStaleMs: (m.bat_stale_s ?? 5) * 1000};
+  batAt = m.bat_age === null || m.bat_age === undefined ? null : performance.now() - m.bat_age * 1000;
   rotorAt = m.age === null || m.age === undefined ? null : performance.now() - m.age * 1000;
   if (rotor.connected && rotor.port && [...q("rot-port").options].some(o => o.value === rotor.port)) q("rot-port").value = rotor.port;   // refleja el puerto realmente abierto
   if (rotor.connected !== was) { log(rotor.connected ? "Rotor conectado en " + rotor.port : "Rotor desconectado"); conLine("sys", rotor.connected ? "Conectado a " + rotor.port + " @ " + rotor.baud : "Desconectado"); if (rotor.connected) setTimeout(enableFollow, 0); }

@@ -237,3 +237,11 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .console-head{flex-wrap:wrap;row-gap:4px}
 .console-head .rf-check{margin-left:0}
 .console-head>span{display:none}.console-head .button{padding:2px 8px}.console-head{flex-wrap:nowrap;gap:6px}
+.bat-top{margin-left:auto;display:inline-flex;align-items:center;gap:7px;font:700 16px var(--mono);color:var(--muted);white-space:nowrap}.bat-top.off{opacity:.45}.bat-top.stale{opacity:.45;text-decoration:line-through}.bat-top+.clock{margin-left:0}
+
+/* ── Posición de la estación: Automática (GPS) / Manual ── */
+.obs-mode{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.obs-mode select{flex:1 1 auto;min-width:0}
+.obs-mode .pill{flex:0 0 auto;padding:4px 10px}
+.observer-card .rotor-hint{margin:0 0 10px}
+.field-grid input.auto-fed{background:#eef3f7;color:var(--muted);border-style:dashed;cursor:default}
