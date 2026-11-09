@@ -1,24 +1,3 @@
-# Comentarios de versión
-
-V8: 
-- Ancho de banda y muestreo editables
-- Aumento de tamaño en elementos de interfaz
-- Adaptación automática de rangos de potencia recibida en Monitor RF
-
-V7:
-- Aumento de tamaño de fuentes
-
-V6:
-- Cambio en la paleta de colores a una con mayor contraste
-- Simplificación de las interacciones para que se pueda manejar solo con mouse sin teclado
-- Aumento en el tamaño de la interfaz para una mejor visualización en pantalla de 7 pulgadas
-- Incorporación de mejoras basadas en Satdump
-
-V5: 
-- Se separó la interfaz en 3 pestañas para visualizar en pantalla de 7 pulgadas. 
-- Se incorpora conexión real a pluto y se añade el script ```mock_maia.py``` que permite simular una pluto de forma externa.
-- Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
-
 # SATTRACK (simulación + monitor RF Maia)
 
 Aplicación web única para seleccionar un satélite del catálogo orbital, elegir una bajada de banda S, iniciar el próximo pase y observar el seguimiento y la recepción simulados. Combina el flujo del selector de satélites con las vistas de seguimiento y espectro de MaiaView. Los proyectos originales permanecen separados.
@@ -49,7 +28,7 @@ La pestaña activa se recuerda al recargar y también se puede abrir con `#selec
 
 ## Uso
 
-1. Ajustar latitud, longitud, altitud y elevación mínima de la estación. La ubicación inicial es Santiago (`-33.4489`, `-70.6693`, 570 m, 10°).
+1. La posición de la estación se toma sola del GPS (modo **Automática**, por defecto; ver «GPS» más abajo). Para fijarla a mano, cambiar el selector a **Manual** y ajustar latitud, longitud y altitud; la elevación mínima siempre es manual. Sin GPS ni fix, los campos conservan los valores iniciales de Santiago (`-33.4489`, `-70.6693`, 570 m, 10°).
 2. Buscar un nombre o NORAD, o utilizar los accesos rápidos. El filtro «Banda S» muestra satélites con una bajada activa entre 2000 y 4000 MHz en SatNOGS DB; «Visibles ahora» usa la elevación calculada para la estación.
 3. Seleccionar el satélite. La aplicación muestra su posición actual, transmisores registrados y próximos pases sobre la elevación mínima durante cinco días.
 4. Elegir una bajada catalogada o, si se quiere probar una frecuencia no catalogada, la opción manual simulada. Elegir la velocidad de simulación e iniciar el próximo pase.
@@ -74,14 +53,42 @@ La simulación comienza 20 segundos antes del siguiente AOS y avanza a 10× por 
 | `orbit.py` | geometría orbital y cálculo de pases |
 | `simulation.py` | reloj acelerado, rotor simulado y pase de la sesión |
 | `maia_rf.py`, `mock_maia.py` | cliente de Maia SDR (espectro y AD9361) y simulador de Maia |
+| `gps_link.py`, `gps_config.py` | lector del GPS ATGM366H (NMEA/UART), posición estable y parámetros de calidad |
 | `serial_link.py`, `rotor_follow.py`, `rotor_config.py` | enlace serial con la ESP32, seguimiento del pase y límites del rotor |
 | `firmware/esp32_rotor/esp32_rotor.ino` | lado ESP32 del protocolo (modo simulado y TODO para tu hardware) |
 | `templates/index.html` | pantalla única |
-| `static/app.js`, `static/rf.js`, `static/rotor.js` | selección/seguimiento, monitor RF y rotor |
+| `static/app.js`, `static/rf.js`, `static/rotor.js`, `static/gps.js` | selección/seguimiento, monitor RF, rotor y posición automática por GPS |
 | `static/app.css` | estilos adaptables |
 
 La API devuelve `GET /api/catalog`, `GET /api/catalog/<NORAD>`, `POST /api/session`, `GET /api/session/<id>` y `POST /api/session/<id>/control`. Cada estado de sesión tiene `geometry`, `rotor`, `receiver` y marcas `simulated: true`; ese contrato separa la selección y la presentación de una futura integración física.
 
+
+## Posición automática con GPS (ATGM366H)
+
+Un hilo de fondo (`gps_link.py`) lee las sentencias NMEA del módulo por UART y mantiene el último fix. La interfaz
+consulta `GET /api/gps` cada 3 s: en modo **Automática** (el de arranque) copia latitud, longitud y altitud a la
+tarjeta «Estación de observación» (campos de solo lectura) y refresca el catálogo, igual que «Actualizar posición».
+
+- **Selector Automática / Manual**: el modo se recuerda en el navegador. En Manual el GPS no toca los campos.
+- **Indicador**: `FIX · N SAT` (verde), `BUSCANDO · N SAT` (ámbar), `SIN DATOS` / `SIN GPS` (gris). Mientras no haya fix, los
+  campos siguen editables y se usan sus valores como respaldo.
+- **Fix aceptado** solo con calidad > 0, ≥ 4 satélites y HDOP ≤ 5; caduca a los 10 s sin fix bueno (`gps_config.py`).
+- **Posición estable**: el GPS tiembla unos metros aun quieto; la posición solo se actualiza al moverse más de 50 m (`GPS_MOVE_M`),
+  para no recalcular pases sin motivo. Una sesión en curso conserva la posición con que se inició.
+- **Peticiones sin `lat`/`lon`/`alt_m`** (uso de la API sin la interfaz) usan la posición del GPS si hay fix, o Santiago si no.
+- La altitud es la que informa el GPS (sobre el nivel del mar).
+
+Cableado en la Raspberry Pi: TX del módulo → RX de la UART (`/dev/ttyS0`, 9600 baud) con la consola serie desactivada
+(`raspi-config` → Interface Options → Serial Port: consola «No», hardware serial «Sí»).
+
+```bash
+python app.py                              # usa /dev/ttyS0 si existe; si no, GPS desactivado (posición manual)
+python app.py --gps-port /dev/ttyAMA0      # otro puerto (o variable SATTRACK_GPS_PORT)
+python app.py --gps-port sim               # GPS simulado: sin fix ~4 s y luego fix en Santiago (para probar sin hardware)
+python app.py --no-gps                     # desactiva el GPS
+```
+
+El puerto del GPS no se puede usar a la vez para la ESP32: la lista de puertos lo marca «en uso por el GPS» y se rechaza conectarlo.
 
 ## Recepción RF real desde Maia SDR (directo a la Pluto)
 
@@ -118,7 +125,9 @@ Protocolo: texto, una línea por mensaje (`\n`), 115200 baud por defecto (`rotor
 | --- | --- | --- |
 | PC → ESP32 | `SET,<az>,<el>` | referencia fija (la usa el seguimiento para mantener la posición); no hay control manual en la interfaz |
 | PC → ESP32 | `TRK,<az>,<el>,<vaz>,<vel>` | seguimiento: posición del satélite (°) y su velocidad angular (°/s), 5 Hz |
-| ESP32 → PC | `POS,<az>,<el>` | posición actual, ~5 Hz |
+| PC → ESP32 | `CAL,<az>,<el>` / `STOP` | calibra la posición actual del sensor / frena y borra fallas (firmware en lazo cerrado con BNO085, ver `rotor_esp32`) |
+| ESP32 → PC | `POS,<az>,<el>` | posición actual medida por el sensor, ~5 Hz (si el sensor cae, deja de enviarse) |
+| ESP32 → PC | `BAT,<V>` | voltaje de la batería en V, ~1 Hz (se muestra en la barra superior, a la izquierda de la hora) |
 | ESP32 → PC | otra línea | se muestra en el registro (`ACK` se ignora; las de depuración deben empezar con `#`) |
 
 - **Referencia manual:** azimut/elevación + *Enviar al rotor*; *Usar az/el del satélite* copia el objetivo de la sesión.

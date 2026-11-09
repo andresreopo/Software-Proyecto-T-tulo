@@ -123,8 +123,14 @@ def catalog():
         band = request.args.get("band", "s")
         if page < 1 or page_size < 1 or page_size > 100 or band not in ("s", "all"):
             raise ValueError("Filtro o paginación inválidos")
+        hours = None
+        if request.args.get("hour_from") is not None or request.args.get("hour_to") is not None:
+            h_from, h_to = int(request.args.get("hour_from", 0)), int(request.args.get("hour_to", 1440))
+            if not (0 <= h_from < h_to <= 1440):
+                raise ValueError("Intervalo horario inválido")
+            hours = (h_from, h_to)
         data = store.search(request.args.get("q", ""), band,
-                            request.args.get("visible") == "1", observer, page, page_size)
+                            request.args.get("visible") == "1", observer, page, page_size, hours)
         return jsonify({"ok": True, **data, "observer": observer, "catalog": store.status()})
     except ValueError as exc:
         return error(exc)

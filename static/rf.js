@@ -237,6 +237,8 @@ function fillForm(c) {
   q("rx-gmode").value = c.rx_gain_mode;
   q("rx-gain").disabled = q("rx-gslider").disabled = c.rx_gain_mode !== "Manual";
   q("rx-gslider").value = c.rx_gain;
+  q("rx-fc").value = trimZeros(c.rx_lo_frequency / 1e6, 6);
+  q("rx-fslider").value = c.rx_lo_frequency / 1e6;
   q("rx-sr").value = trimZeros(c.sampling_frequency / 1e6, 3);
   q("rx-sslider").value = c.sampling_frequency / 1e6;
   q("rx-bw").value = trimZeros(c.rx_rf_bandwidth / 1e6, 3);
@@ -287,6 +289,7 @@ function bindMHz(key, num, sld) {
   q(num).addEventListener("keydown", e => { if (e.key === "Enter") e.target.blur(); });
   q(num).addEventListener("change", send);
 }
+bindMHz("rx_lo_frequency", "rx-fc", "rx-fslider");
 bindMHz("sampling_frequency", "rx-sr", "rx-sslider");
 bindMHz("rx_rf_bandwidth", "rx-bw", "rx-bslider");
 

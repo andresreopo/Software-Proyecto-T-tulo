@@ -60,11 +60,18 @@
             <label><input id="sband-only" type="checkbox" checked> Banda S</label>
             <label><input id="visible-only" type="checkbox"> Visibles ahora</label>
           </div>
+          <div class="hour-filter">
+            <label class="hour-head"><input id="hour-enabled" type="checkbox"> Hora de observación <span id="hour-label" class="hour-label">00:00 – 24:00</span></label>
+            <div class="dual-range" id="hour-range">
+              <div class="dual-track"><div class="dual-fill" id="hour-fill"></div></div>
+              <input id="hour-from" type="range" min="0" max="48" step="1" value="0" aria-label="Hora inicial" disabled>
+              <input id="hour-to" type="range" min="0" max="48" step="1" value="48" aria-label="Hora final" disabled>
+            </div>
+            <small class="hour-note">Hora de Chile · satélites sobre la elevación mínima en esa franja, próximas 24 h</small>
+          </div>
           <div class="quick-label">Accesos rápidos</div>
           <div class="quick-list" id="quick-list">
-            <button data-norad="26958">PROBA-1</button><button data-norad="36037">PROBA-2</button>
-            <button data-norad="39159">PROBA-V</button><button data-norad="58025">PVCC</button>
-            <button data-norad="41240">JASON-3</button><button data-norad="29479">HINODE</button>
+            <button data-norad="38011">SSOT</button><button data-norad="60133">GOES 19</button>
           </div>
           <div class="catalog-summary"><span id="catalog-summary">Cargando objetos…</span><span class="refresh-group"><label for="refresh-sources" class="refresh-text">Actualizar bases</label><button id="refresh-sources" type="button" title="Actualizar CelesTrak y SatNOGS" aria-label="Actualizar bases">↻</button></span></div>
           <div id="satellite-list" class="satellite-list" aria-live="polite"></div>
@@ -158,6 +165,8 @@
                 </label>
                 <label>Ganancia <span>dB</span><input id="rx-gain" type="number" step="any"></label>
                 <input id="rx-gslider" class="rf-slider" type="range" min="0" max="73" step="1" value="50" aria-label="Ganancia (deslizador)">
+                <label>Frecuencia central <span>MHz</span><input id="rx-fc" type="number" min="70" max="6000" step="any"></label>
+                <input id="rx-fslider" class="rf-slider" type="range" min="70" max="6000" step="0.1" value="2200" aria-label="Frecuencia central (deslizador)">
                 <label>Muestreo <span>MHz</span><input id="rx-sr" type="number" step="any"></label>
                 <input id="rx-sslider" class="rf-slider" type="range" min="0.521" max="61.44" step="0.001" value="61.44" aria-label="Muestreo (deslizador)">
                 <label>Ancho de banda <span>MHz</span><input id="rx-bw" type="number" step="any"></label>

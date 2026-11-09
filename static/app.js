@@ -61,7 +61,9 @@ function satButton(item) {
   left.append(name, sub);
   const right = document.createElement("span"), el = document.createElement("span"), hint = document.createElement("small");
   right.className = "elevation" + (item.visible_now ? " visible" : "");
-  el.textContent = fmt(item.elevation_deg, 1) + "°"; hint.textContent = item.visible_now ? "visible" : "bajo mínimo";
+  const inWindow = item.window_max_el_deg !== null && item.window_max_el_deg !== undefined;
+  el.textContent = fmt(inWindow ? item.window_max_el_deg : item.elevation_deg, 1) + "°";
+  hint.textContent = inWindow ? "máx. en franja" : item.visible_now ? "visible" : "bajo mínimo";
   right.append(el, hint); button.append(left, right);
   button.addEventListener("click", () => selectSatellite(item.norad_id));
   return button;
@@ -71,6 +73,7 @@ async function loadCatalog(resetPage = false) {
   const sequence = ++querySequence;
   $("catalog-summary").textContent = "Calculando catálogo…";
   const params = new URLSearchParams({...observer(), q:$("search").value.trim(), band:$("sband-only").checked ? "s" : "all", visible:$("visible-only").checked ? "1" : "0", page:String(page), page_size:"40"});
+  if ($("hour-enabled").checked) { params.set("hour_from", String(Number($("hour-from").value) * 30)); params.set("hour_to", String(Number($("hour-to").value) * 30)); }
   try {
     const data = await api("/api/catalog?" + params);
     if (sequence !== querySequence) return;
@@ -284,6 +287,23 @@ let searchTimer;
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadCatalog(true),250);});
 $("sband-only").addEventListener("change",()=>loadCatalog(true));
 $("visible-only").addEventListener("change",()=>loadCatalog(true));
+// ── Franja horaria de observación (control deslizante de 2 puntos, pasos de 30 min) ──
+const halfHour = v => { const m = Number(v) * 30; return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); };
+function updateHourUI() {
+  const a = $("hour-from"), b = $("hour-to");
+  if (Number(a.value) > Number(b.value)) { if (document.activeElement === a) a.value = b.value; else b.value = a.value; }
+  if (Number(a.value) === Number(b.value)) { if (Number(b.value) < 48) b.value = Number(a.value) + 1; else a.value = 47; }
+  $("hour-label").textContent = `${halfHour(a.value)} – ${halfHour(b.value)}`;
+  $("hour-fill").style.left = (a.value / 48 * 100) + "%"; $("hour-fill").style.right = (100 - b.value / 48 * 100) + "%";
+}
+let hourTimer;
+for (const id of ["hour-from", "hour-to"]) $(id).addEventListener("input", () => { updateHourUI(); if ($("hour-enabled").checked) { clearTimeout(hourTimer); hourTimer = setTimeout(() => loadCatalog(true), 400); } });
+$("hour-enabled").addEventListener("change", () => {
+  const on = $("hour-enabled").checked;
+  $("hour-from").disabled = $("hour-to").disabled = !on; document.querySelector(".hour-filter").classList.toggle("off", !on);
+  loadCatalog(true);
+});
+document.querySelector(".hour-filter").classList.add("off"); updateHourUI();
 $("apply-observer").addEventListener("click",()=>{loadCatalog(true);if(selected)selectSatellite(selected.norad_id);log("Posición del observador actualizada.");});
 $("prev-page").addEventListener("click",()=>{if(page>1){page--;loadCatalog();}});
 $("next-page").addEventListener("click",()=>{if(page<pages){page++;loadCatalog();}});

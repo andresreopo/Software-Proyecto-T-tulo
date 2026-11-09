@@ -5,12 +5,15 @@ from __future__ import annotations
 import datetime as dt
 import json
 import threading
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import requests
 from skyfield.api import EarthSatellite, load, wgs84
 
 
+CHILE = ZoneInfo("America/Santiago")
+WINDOW_STEP_MIN = 2   # paso de muestreo para el filtro por franja horaria
 DATA = Path(__file__).resolve().parent / "data"
 CELESTRAK = "https://celestrak.org/NORAD/elements/gp.php"
 SATNOGS = "https://db.satnogs.org/api/transmitters/"
@@ -116,7 +119,9 @@ class CatalogStore:
             })
         return sorted(result, key=lambda item: item["frequency_mhz"])
 
-    def search(self, query, band, visible_only, observer, page, page_size):
+    def search(self, query, band, visible_only, observer, page, page_size, hours=None):
+        """`hours` = (inicio, fin) en minutos del día (hora de Chile) o None. Si se da, solo pasan los
+        satélites que superan la elevación mínima dentro de esa franja en las próximas 24 h."""
         query = str(query or "").strip().casefold()[:80]
         with self.lock:
             records = list(self.by_id.values())
@@ -130,10 +135,29 @@ class CatalogStore:
         ts = load.timescale()
         moment = ts.now()
         station = wgs84.latlon(observer["lat"], observer["lon"], elevation_m=observer["alt_m"])
+        window = None
+        if hours is not None:
+            start = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
+            moments = [start + dt.timedelta(minutes=WINDOW_STEP_MIN * k) for k in range(1440 // WINDOW_STEP_MIN + 1)]
+            keep = []
+            for k, m in enumerate(moments):
+                local = m.astimezone(CHILE)
+                if hours[0] <= local.hour * 60 + local.minute < hours[1]:
+                    keep.append(k)
+            if not keep:
+                return {"items": [], "total": 0, "page": page, "page_size": page_size,
+                        "computed_at": moment.utc_datetime().isoformat()}
+            window = ts.from_datetimes([moments[k] for k in keep])
         items = []
         for record in records:
             try:
                 sat = EarthSatellite.from_omm(ts, record)
+                window_max = None
+                if window is not None:
+                    w_el = (sat - station).at(window).altaz()[0].degrees
+                    window_max = float(w_el.max())
+                    if window_max < observer["min_el"]:
+                        continue
                 elevation, azimuth, _ = (sat - station).at(moment).altaz()
                 el = float(elevation.degrees)
                 if visible_only and el < observer["min_el"]:
@@ -147,6 +171,7 @@ class CatalogStore:
                     "visible_now": el >= observer["min_el"],
                     "frequencies_mhz": sorted({x["frequency_mhz"] for x in tx}),
                     "epoch_utc": record.get("EPOCH"),
+                    "window_max_el_deg": None if window_max is None else round(window_max, 1),
                 })
             except (ValueError, TypeError, KeyError, ArithmeticError):
                 continue
