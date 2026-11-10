@@ -126,6 +126,8 @@ class SimPort:
                     self.trk, self.trk_t = True, time.monotonic()
                 elif p[0].upper() in ("SET", "TRK"):
                     self._q.put(b"ERR,formato\n")
+                elif ln.strip():
+                    self._q.put(b"ERR,comando desconocido\n")
             except ValueError:
                 self._q.put(b"ERR,formato\n")
         return len(data)
@@ -262,6 +264,25 @@ class SerialLink:
             self._tgt = (az, el)
         self._emit()
         return self.state()
+
+    def send_raw(self, text: str) -> None:
+        """Comando manual de la terminal: una línea de texto imprimible, tal cual, terminada en \\n."""
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("Escribe un comando.")
+        if len(text) > 120 or not all(32 <= ord(c) < 127 for c in text):
+            raise ValueError("El comando debe ser texto ASCII imprimible de hasta 120 caracteres.")
+        with self._lock:
+            ser = self._ser if self._connected else None
+        if ser is None:
+            raise RuntimeError("El rotor no está conectado.")
+        try:
+            with self._wlock:
+                ser.write((text + "\n").encode("ascii")); self._io("tx", text)
+                if hasattr(ser, "flush"):
+                    ser.flush()
+        except (serial.SerialException, OSError) as e:
+            raise RuntimeError(f"No se pudo escribir en el puerto: {e}")
 
     def send_track(self, az: float, el: float, vaz: float, vel: float) -> dict:
         """Referencia móvil: posición del satélite y su velocidad angular (°/s)."""

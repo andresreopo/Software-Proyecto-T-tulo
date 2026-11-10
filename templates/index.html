@@ -136,6 +136,11 @@
               <button type="button" class="button ghost" id="con-pause">Pausar</button>
               <button type="button" class="button ghost" id="con-clear">Limpiar</button></div>
             <div id="serial-console" class="serial-console" role="log" aria-live="off"></div>
+            <form id="con-form" class="console-input" autocomplete="off">
+              <span class="console-prompt" aria-hidden="true">›</span>
+              <input id="con-input" type="text" maxlength="120" spellcheck="false" placeholder="Comando manual, p. ej. SET,180,45" aria-label="Comando serial">
+              <button type="submit" class="button primary" id="con-send">Enviar</button>
+            </form>
           </section>
         </div>
       </section>
@@ -158,6 +163,26 @@
                 <strong id="rx-peak-big">—</strong>
                 <span class="rf-peak-unit">MHz</span>
                 <span id="signal-pill" class="pill muted">SIN SEÑAL</span>
+              </div>
+              <div class="rf-peak rf-cursor">
+                <small>FRECUENCIA CURSOR</small>
+                <strong id="rx-cursor-freq">—</strong>
+                <span class="rf-peak-unit">MHz</span>
+              </div>
+              <div class="rf-integ card-inset">
+                <label>Integración <span>frames</span>
+                  <select id="rx-integ">
+                    <option value="1">Sin integración</option><option value="4" selected>4</option><option value="16">16</option>
+                    <option value="64">64</option><option value="256">256</option><option value="1024">1024</option>
+                  </select>
+                </label>
+                <small id="rx-integ-note" class="rf-note">—</small>
+                <div class="rf-stats">
+                  <div><small>RUIDO</small><b id="rx-noise">—</b><i>dB</i></div>
+                  <div><small>SNR PICO</small><b id="rx-snr">—</b><i>dB</i></div>
+                </div>
+                <label class="rf-check"><input type="checkbox" id="rx-noise-line" checked> Mostrar nivel de ruido</label>
+                <button type="button" class="button ghost full" id="rx-integ-reset">Reiniciar integración</button>
               </div>
               <div class="rf-gain card-inset">
                 <label>Modo de ganancia

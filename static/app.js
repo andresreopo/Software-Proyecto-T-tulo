@@ -104,6 +104,16 @@ function renderPasses(passes) {
     card.append(title, when, elevation); root.append(card);
   }
 }
+let rfFallbackMHz = null;
+function tuneRf(label) {
+  if (typeof window.rfTune !== "function") return;
+  const select = $("transmitter"), option = select.selectedOptions[0];
+  let mhz = null;
+  if (select.value === "manual") { const m = parseFloat($("manual-frequency").value); mhz = Number.isFinite(m) ? m : rfFallbackMHz; }
+  else if (option && option.dataset.mhz) mhz = Number(option.dataset.mhz);
+  if (mhz !== null) window.rfTune(mhz, label || (selected && selected.name));
+  else log("Sin bajada catalogada que el receptor pueda sintonizar: la frecuencia central no se modificó.");
+}
 function renderSelected(sat) {
   selected = sat;
   $("selected-name").textContent = sat.name || `NORAD ${sat.norad_id}`;
@@ -117,7 +127,7 @@ function renderSelected(sat) {
   const tx = sat.transmitters.filter(x => x.frequency_mhz >= 2000 && x.frequency_mhz <= 4000);
   const select = $("transmitter"); select.replaceChildren();
   for (const item of tx) {
-    const option = document.createElement("option"); option.value = item.uuid || "";
+    const option = document.createElement("option"); option.value = item.uuid || ""; option.dataset.mhz = item.frequency_mhz;
     option.textContent = `${fmt(item.frequency_mhz, 3)} MHz · ${item.mode}${item.unconfirmed ? " · sin confirmar" : ""}`;
     select.append(option);
   }
@@ -125,6 +135,9 @@ function renderSelected(sat) {
   if (!tx.length) select.value = "manual";
   select.disabled = false;
   $("manual-wrap").hidden = select.value !== "manual";
+  // Receptor RF: sin bajada en banda S se usa la primera bajada catalogada que el AD9361 pueda sintonizar (70–6000 MHz).
+  rfFallbackMHz = (sat.transmitters.map(x => x.frequency_mhz).find(f => f >= 70 && f <= 6000)) ?? null;
+  tuneRf(sat.name);
   $("start-session").disabled = sat.passes.length === 0;
   renderPasses(sat.passes);
   document.querySelectorAll(".sat-item").forEach(button => button.classList.toggle("active", button.textContent.includes(`#${sat.norad_id}`)));
@@ -308,7 +321,8 @@ $("apply-observer").addEventListener("click",()=>{loadCatalog(true);if(selected)
 $("prev-page").addEventListener("click",()=>{if(page>1){page--;loadCatalog();}});
 $("next-page").addEventListener("click",()=>{if(page<pages){page++;loadCatalog();}});
 $("quick-list").addEventListener("click",event=>{const button=event.target.closest("button[data-norad]");if(button)selectSatellite(Number(button.dataset.norad));});
-$("transmitter").addEventListener("change",()=>$("manual-wrap").hidden=$("transmitter").value!=="manual");
+$("transmitter").addEventListener("change",()=>{$("manual-wrap").hidden=$("transmitter").value!=="manual";tuneRf();});
+$("manual-frequency").addEventListener("change",()=>{if($("transmitter").value==="manual")tuneRf();});
 $("start-session").addEventListener("click",startSession);
 $("pause-session").addEventListener("click",()=>control(latest?.status==="paused"?"resume":"pause"));
 $("stop-session").addEventListener("click",()=>control("stop"));

@@ -163,7 +163,10 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .rf-peak{border:1px solid #a2c1d3;background:radial-gradient(circle at 80% 0,#eff6f9 0,transparent 60%),#f6fafc;border-radius:8px;padding:14px;text-align:center}
 .rf-peak small{display:block;font:16px var(--mono);letter-spacing:.07em;color:var(--dim)}
 .rf-peak strong{display:block;font:700 clamp(26px,4.2vw,44px)/1.1 var(--mono);color:var(--cyan);margin:10px 0 2px;letter-spacing:-.04em;white-space:nowrap}
+.rf-cursor{margin-top:10px;padding:10px 14px}.rf-cursor strong{font-size:clamp(22px,3.4vw,32px);color:var(--amber);margin:6px 0 0}.rf-cursor .rf-peak-unit{margin-bottom:2px}
 .rf-peak-unit{display:block;font:700 16px var(--mono);color:var(--muted);margin-bottom:10px}
+.rf-integ{display:flex;flex-direction:column;gap:8px}.rf-integ label{display:block;font-size:16px;color:var(--muted)}.rf-integ select{width:100%;margin-top:5px}.rf-integ .rf-check{display:flex;align-items:center;gap:6px}
+.rf-note{font:14px var(--mono);color:var(--dim)}.rf-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.rf-stats div{border:1px solid var(--line);border-radius:6px;padding:6px 8px;text-align:center}.rf-stats small{display:block;font:14px var(--mono);color:var(--dim);letter-spacing:.06em}.rf-stats b{font:700 22px var(--mono);color:var(--cyan);margin-right:4px}.rf-stats i{font:normal 14px var(--mono);color:var(--muted)}
 .rf-gain{display:flex;flex-direction:column;gap:10px}
 .rf-gain label{display:block;font-size:16px;color:var(--muted)}
 .rf-gain select,.rf-gain input{width:100%;margin-top:5px}
@@ -206,6 +209,7 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .console-head .button{min-height:26px;padding:2px 9px;font-size:16px}
 .serial-console{flex:1 1 auto;min-height:150px;max-height:calc(100dvh - 150px);overflow:auto;background:#fafcfd;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:16px/1.5 var(--mono);color:var(--muted);scrollbar-width:thin}
 .serial-console div{white-space:pre-wrap;word-break:break-all}
+.console-input{display:flex;align-items:center;gap:8px;margin-top:8px;flex:0 0 auto}.console-input input{flex:1;min-width:0;font:16px var(--mono)}.console-prompt{font:700 18px var(--mono);color:var(--cyan)}.console-input .button{min-height:36px;padding:0 14px}
 .con-tx{color:var(--amber)}.con-rx{color:var(--cyan)}.con-sys{color:var(--dim)}
 .rotor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 @media(max-width:700px){.track-grid{grid-template-columns:minmax(0,1fr)}.rotor-grid{grid-template-columns:minmax(0,1fr)}}

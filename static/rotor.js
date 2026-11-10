@@ -123,6 +123,26 @@ q("con-pause").onclick = () => {
   if (!conPaused) { const b = conBuf; conBuf = []; b.forEach(([k, t]) => conLine(k, t)); }
 };
 
+// Entrada de la terminal: Enter envía; ↑/↓ recorren el historial de comandos enviados.
+const history_ = []; let histPos = 0;
+q("con-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const input = q("con-input"), text = input.value.trim();
+  if (!text) return;
+  if (history_[history_.length - 1] !== text) history_.push(text);
+  if (history_.length > 50) history_.shift();
+  histPos = history_.length; input.value = "";
+  try { await call("/api/serial/send", {text}); }
+  catch (err) { conLine("sys", "Error: " + err.message); }
+  input.focus();
+});
+q("con-input").addEventListener("keydown", e => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  if (!history_.length) return;
+  histPos = Math.max(0, Math.min(history_.length, histPos + (e.key === "ArrowUp" ? -1 : 1)));
+  q("con-input").value = history_[histPos] ?? ""; e.preventDefault();
+});
+
 // ── Eventos del servidor (/ws/rotor) ────────────────────────────────────────
 function applyRotor(m) {
   const was = rotor.connected;

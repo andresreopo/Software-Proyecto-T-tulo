@@ -437,6 +437,19 @@ def serial_connect():
         return error(f"No se pudo abrir {port}: {exc}", 502)
 
 
+@app.post("/api/serial/send")
+def serial_send():
+    """Terminal serial: envía una línea manual a la ESP32."""
+    body = request.get_json(silent=True) or {}
+    try:
+        rotor.send_raw(body.get("text"))
+    except ValueError as exc:
+        return error(exc)
+    except RuntimeError as exc:
+        return error(exc, 409)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/serial/disconnect")
 def serial_disconnect():
     follower.stop(hold=False)

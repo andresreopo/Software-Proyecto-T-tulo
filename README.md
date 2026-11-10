@@ -1,3 +1,37 @@
+# Comentarios de versión
+
+V10:
+- Incorporación de filtro por horario de pase para planificación de observaciones
+- Incorporación de terminal serial para envío manual de comandos
+- Slider para modificar frecuencia central en monitor RF
+- Visualización de frecuencia donde se posiciona el cursor
+- Selección automática de frecuencia central al elegir un satélite de la lista
+- Incorporación de filtro de promedio móvil para monitor RF
+
+V9: 
+- Incorporación de lectura GPS para posicionamiento automático
+- Corrección de errores de visualización en escalas de Monitor RF
+
+V8: 
+- Ancho de banda y muestreo editables
+- Aumento de tamaño en elementos de interfaz
+- Adaptación automática de rangos de potencia recibida en Monitor RF
+
+V7:
+- Aumento de tamaño de fuentes
+
+V6:
+- Cambio en la paleta de colores a una con mayor contraste
+- Simplificación de las interacciones para que se pueda manejar solo con mouse sin teclado
+- Aumento en el tamaño de la interfaz para una mejor visualización en pantalla de 7 pulgadas
+- Incorporación de mejoras basadas en Satdump
+
+V5: 
+- Se separó la interfaz en 3 pestañas para visualizar en pantalla de 7 pulgadas. 
+- Se incorpora conexión real a pluto y se añade el script ```mock_maia.py``` que permite simular una pluto de forma externa.
+- Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
+
+
 # SATTRACK (simulación + monitor RF Maia)
 
 Aplicación web única para seleccionar un satélite del catálogo orbital, elegir una bajada de banda S, iniciar el próximo pase y observar el seguimiento y la recepción simulados. Combina el flujo del selector de satélites con las vistas de seguimiento y espectro de MaiaView. Los proyectos originales permanecen separados.

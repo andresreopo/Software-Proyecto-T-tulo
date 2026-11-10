@@ -16,6 +16,10 @@ bctx.fillStyle = css("--bg"); bctx.fillRect(0, 0, wfBuf.width, wfBuf.height);
 let cfg = {freq: 0, rate: 0, bw: 0};
 let N = 0;
 let smooth = null, peaks = null;
+// Integrador: promedio móvil exponencial de POTENCIA lineal (no de dB), con arranque en promedio acumulado.
+// Con M frames la desviación del ruido baja ≈ √M, así que las señales débiles emergen del piso.
+let lin = null, integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noiseDb = null;
+function resetIntegration() { lin = null; integSeen = 0; noiseDb = null; if (smooth) peaks = Float32Array.from(smooth); }
 let lo = -120, hi = -20;
 let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
 const PAD = {l: 60, r: 24, t: 10, b: 28};
@@ -73,6 +77,12 @@ function hoverLine(ctx, g) {
   ctx.strokeStyle = "rgba(15,30,45,.45)"; ctx.lineWidth = 1; ctx.beginPath();
   ctx.moveTo(hoverX + .5, g.y0); ctx.lineTo(hoverX + .5, g.y1); ctx.stroke();
 }
+// Piso de ruido: mediana del espectro integrado sin el 10 % de cada borde (donde cae el filtro del AD9361),
+// robusta frente a señales de banda angosta. Si la señal ocupa más de la mitad de la banda, subestima el SNR.
+function estimateNoise(a) {
+  const s = Float32Array.from(a.subarray(Math.floor(a.length * .1), Math.ceil(a.length * .9))).sort();
+  return s[s.length >> 1];
+}
 function peakIndex(a) { let k = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[k]) k = i; return k; }
 
 // ── Espectro ────────────────────────────────────────────────────────────────
@@ -111,6 +121,13 @@ function drawSpectrum() {
     sctx.stroke();
   };
     line(smooth, css("--cyan"), 1.4);
+  if (noiseDb !== null && q("rx-noise-line").checked) {
+    const y = Y(noiseDb);
+    sctx.save(); sctx.setLineDash([6, 4]); sctx.strokeStyle = css("--amber"); sctx.lineWidth = 1.2;
+    sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke(); sctx.restore();
+    sctx.fillStyle = css("--amber"); sctx.font = "14px " + css("--mono"); sctx.textAlign = "right"; sctx.textBaseline = "bottom";
+    sctx.fillText("ruido " + noiseDb.toFixed(1) + " dB", g.x1 - 4, y - 2);
+  }
 
   {
     const k = peakIndex(smooth), x = g.x0 + k / (smooth.length - 1) * (g.x1 - g.x0), y = Y(smooth[k]);
@@ -190,20 +207,35 @@ function onSpectrum(buf) {
   if (buf.byteLength % 4) return;
   const a = new Float32Array(buf); N = a.length; lastFrameAt = performance.now();
   q("rx-empty").style.display = "none";
-  if (!smooth || smooth.length !== N) { smooth = Float32Array.from(a); peaks = Float32Array.from(a); }
-  const k = 0.5;
+  const nowT = performance.now();
+  if (prevFrameT && nowT - prevFrameT < 2000) fps = fps ? 0.9 * fps + 0.1 * (1000 / (nowT - prevFrameT)) : 1000 / (nowT - prevFrameT);
+  prevFrameT = nowT;
+  if (!smooth || smooth.length !== N) { smooth = Float32Array.from(a); peaks = Float32Array.from(a); lin = null; }
+  if (!lin || lin.length !== N) { lin = new Float32Array(N); integSeen = 0; }
+  integSeen++;
+  const alpha = 1 / Math.min(integM, integSeen);
   for (let i = 0; i < N; i++) {
-    smooth[i] = k * smooth[i] + (1 - k) * a[i];
-    if (a[i] > peaks[i]) peaks[i] = a[i];
+    const v = a[i];
+    if (Number.isFinite(v)) {
+      const p = Math.pow(10, v / 10);
+      lin[i] = integSeen === 1 ? p : lin[i] + alpha * (p - lin[i]);
+    }
+    smooth[i] = 10 * Math.log10(lin[i] || 1e-30);
+    if (smooth[i] > peaks[i]) peaks[i] = smooth[i];
   }
   autoScale();
-  pushWaterfallRow(a);
+  pushWaterfallRow(smooth);          // la cascada también muestra la señal integrada
   draw();
   const now = performance.now();
   if (now - lastPeakTxt > 250) {
     lastPeakTxt = now;
     const pk = peakIndex(smooth), fpk = (cfg.freq - cfg.rate / 2 + pk / (N - 1) * cfg.rate) / 1e6;
     q("rx-peak-big").textContent = trimZeros(fpk, 4);
+    noiseDb = estimateNoise(smooth);
+    q("rx-noise").textContent = noiseDb.toFixed(1);
+    q("rx-snr").textContent = (smooth[pk] - noiseDb).toFixed(1);
+    q("rx-integ-note").textContent = integM === 1 ? "Sin promedio" :
+      `Promedio de ${integM} frames` + (fps > 0.5 ? ` ≈ ${(integM / fps).toFixed(integM / fps < 10 ? 1 : 0)} s` : "") + (integSeen < integM ? ` · acumulando ${integSeen}/${integM}` : "");
     updatePill();
   }
 }
@@ -258,14 +290,23 @@ async function loadConfig() {
   try { fillForm(await request("GET")); log("Configuración leída desde Maia."); }
   catch (e) { log(e.message); }
 }
-async function applyConfig(body) {
+async function applyConfig(body, quiet = false) {
   try {
     fillForm(await request("PATCH", body));
-    if (smooth) peaks = Float32Array.from(smooth);
+    resetIntegration();                 // otra Fc/muestreo: el promedio anterior ya no corresponde
     rangeInit = false;
     log("Configuración aplicada: Fc " + fmtHz(cfg.freq) + ", SR " + fmtHz(cfg.rate));
-  } catch (e) { log(e.message); if (typeof toast === "function") toast(e.message); loadConfig(); }
+  } catch (e) { log(e.message); if (!quiet && typeof toast === "function") toast(e.message); loadConfig(); }
 }
+// Llamado desde app.js al elegir satélite/transmisor: centra el receptor en esa frecuencia (rango AD9361: 70–6000 MHz).
+window.rfTune = async (mhz, label) => {
+  if (!Number.isFinite(mhz) || mhz < 70 || mhz > 6000) { log("Frecuencia fuera del rango del AD9361 (70–6000 MHz): " + mhz); return false; }
+  const hz = Math.round(mhz * 1e6);
+  if (cfg.freq === hz) return true;
+  await applyConfig({rx_lo_frequency: hz}, true);
+  if (label) log("Fc ajustada a " + trimZeros(mhz, 6) + " MHz (" + label + ").");
+  return true;
+};
 function applyGain() {
   const mode = q("rx-gmode").value, g = parseFloat(q("rx-gain").value);
   if (mode === "Manual" && isNaN(g)) { log("Ingresa una ganancia válida."); return; }
@@ -293,9 +334,22 @@ bindMHz("rx_lo_frequency", "rx-fc", "rx-fslider");
 bindMHz("sampling_frequency", "rx-sr", "rx-sslider");
 bindMHz("rx_rf_bandwidth", "rx-bw", "rx-bslider");
 
+// Integrador
+q("rx-integ").addEventListener("change", () => { integM = parseInt(q("rx-integ").value) || 1; resetIntegration(); rangeInit = false; draw(); });
+q("rx-integ-reset").addEventListener("click", () => { resetIntegration(); rangeInit = false; log("Integración reiniciada."); });
+q("rx-noise-line").addEventListener("change", draw);
+
 // ── Interacción con el espectro y el waterfall ──────────────────────────────
+function cursorFreqMHz(x, width) {
+  const x0 = PAD.l, x1 = width - PAD.r;
+  if (!cfg.rate || x < x0 || x > x1) return null;
+  return (cfg.freq - cfg.rate / 2 + (x - x0) / (x1 - x0) * cfg.rate) / 1e6;
+}
+function showCursorFreq(f) { q("rx-cursor-freq").textContent = f === null ? "—" : trimZeros(f, 4); }
 function onMove(e) {
-  hoverX = e.clientX - e.currentTarget.getBoundingClientRect().left;
+  const r = e.currentTarget.getBoundingClientRect();
+  hoverX = e.clientX - r.left;
+  showCursorFreq(cursorFreqMHz(hoverX, r.width));
   draw();
 }
 function onDblClick(e) {
@@ -306,7 +360,7 @@ function onDblClick(e) {
 }
 [specC, wfC].forEach(c => {
   c.addEventListener("mousemove", onMove);
-  c.addEventListener("mouseleave", () => { hoverX = null; draw(); });
+  c.addEventListener("mouseleave", () => { hoverX = null; showCursorFreq(null); draw(); });
   c.addEventListener("dblclick", onDblClick);
 });
 addEventListener("resize", draw);
