@@ -50,6 +50,26 @@ Abrir [http://127.0.0.1:5003/](http://127.0.0.1:5003/). Detener el servidor con 
 
 El servidor escucha solo en `127.0.0.1` por defecto. Para acceder desde otro equipo de la misma red, iniciarlo con `--host 0.0.0.0` y abrir `http://IP_DEL_EQUIPO:5003/`, sujeto al firewall local. El monitor RF se conecta a la Pluto (Maia) y el rotor puede conectarse a una ESP32 por puerto serial: con `--host 0.0.0.0` cualquier equipo de la red podría enviar comandos al rotor y cambiar la sintonía, así que úsalo solo en una red de confianza.
 
+## Arranque automático en Raspberry Pi
+
+Desde una terminal en la Raspberry Pi, entra a la copia local del repositorio. Usa el mismo usuario con el que abres el escritorio y confirma que SATTRACK funciona manualmente. Detén esa instancia antes de instalar el servicio para liberar el puerto 5003.
+
+```bash
+bash deploy/raspberry-pi/install.sh
+```
+
+El instalador configura el servicio `sattrack.service` y el inicio automático de Chromium en modo quiosco en Raspberry Pi OS con `labwc`. Chromium espera a que la interfaz responda en `http://127.0.0.1:5003/`. Puedes volver a ejecutar el instalador después de actualizar estos scripts.
+
+Si el Python que usas está en otro entorno, actívalo antes de instalar o indica su ruta absoluta con `SATTRACK_PYTHON=/ruta/al/entorno/bin/python bash deploy/raspberry-pi/install.sh`. Si ya arrancas `app.py` con opciones para la Pluto, el GPS o la ESP32, guarda tus opciones en `/etc/default/sattrack` antes de ejecutar el instalador. Ajusta los puertos y la IP del ejemplo a tu equipo.
+
+```ini
+SATTRACK_ARGS="--gps-port /dev/ttyAMA0 --serial-port /dev/ttyUSB0 --pluto-ip 192.168.2.1"
+```
+
+Mantén el puerto HTTP `5003` para el quiosco. En `sudo raspi-config`, activa el arranque al escritorio y el inicio de sesión automático del escritorio. Reinicia con `sudo reboot` para comprobar que SATTRACK aparece en pantalla completa.
+
+Si la interfaz no aparece, prueba `curl -fsS http://127.0.0.1:5003/api/status`. Si el servidor no responde, revisa el registro con `sudo journalctl -u sattrack.service -b -n 50 --no-pager`.
+
 ## Disposición en 3 pestañas (pantalla de 7")
 
 La interfaz se divide en tres pestañas táctiles, pensadas para 800×480 y 1024×600 (en pantallas más grandes ocupan todo el ancho):
