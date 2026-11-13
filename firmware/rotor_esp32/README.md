@@ -131,3 +131,14 @@ invertido; sensor caído y recuperación. Falta validar con hardware real.
 motores con escala ×1.05 (az) y ×0.88 (el): recuperó la desalineación (11.8°), las escalas (×1.051 y ×0.884) y,
 aplicada, azimut y elevación siguieron lo pedido con ≤ 0.5° de error (antes: 17° de deriva de azimut a 52° de
 elevación). Con 4 °/s y 5 °/s de tope del motor no se ha probado el barrido a otras velocidades.
+
+
+## Precisión del sensor y calibración del magnetómetro
+
+- `ACC` responde `# acc fusion=<Unreliable|Low|Medium|High>(n) err=<°> mag=<...>(n)`: calidad de la
+  fusión, error angular estimado y estado de calibración del magnetómetro (MagAcc). `IMU` lo incluye.
+- Con `POS_INCLUDE_ACCURACY = true` (RotorConfig.h) `POS` pasa a
+  `POS,<az>,<el>,<fusionAcc 0-3>,<err_deg>,<magAcc 0-3>`. Por defecto queda el `POS,<az>,<el>` original.
+- Rutina de calibración (con el rotor detenido): `MAGCAL` -> mover el sensor en figuras de 8, lejos de
+  motores e imanes, hasta ver `Mag=High` -> `SAVECAL` (guarda en la flash del BNO085 y termina MAGCAL).
+  `ENDCAL` aborta sin guardar. Mientras dura MAGCAL el firmware rechaza SET/TRK/CALAX con `ERR,busy`.

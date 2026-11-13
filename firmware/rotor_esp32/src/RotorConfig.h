@@ -64,6 +64,20 @@ constexpr uint32_t IMU_REPORT_US = 10000;  // un dato cada 10 ms (100 Hz)
 // Sin datos del sensor por este tiempo -> los motores frenan y se deja de enviar POS.
 constexpr uint32_t IMU_TIMEOUT_MS = 300;
 
+// Precisión del sensor: estado de calibración del magnetómetro (MagAcc) y de la fusión.
+// Niveles: 0=Unreliable 1=Low 2=Medium 3=High. El magnetómetro se pide a este período solo
+// para conocer MagAcc (0 = no pedirlo; MagAcc quedaría en 0).
+constexpr uint32_t IMU_MAG_REPORT_US = 50000;  // 20 Hz
+// true : POS,<az>,<el>,<fusionAcc 0-3>,<error_deg>,<magAcc 0-3>  (campos extra al final).
+// false: POS,<az>,<el> (protocolo original; la interfaz no necesita cambios).
+// ACC e IMU siempre muestran la precisión, sea cual sea este valor.
+constexpr bool POS_INCLUDE_ACCURACY = false;
+
+// Rutina de calibración del magnetómetro (comandos MAGCAL / SAVECAL / ENDCAL).
+constexpr uint32_t MAGCAL_REPORT_MS = 500;        // período del reporte "# magcal ..."
+constexpr uint32_t MAGCAL_HIGH_HOLD_MS = 3000;    // tiempo en Mag=High para avisar que está listo
+constexpr uint32_t MAGCAL_SAVE_TIMEOUT_MS = 5000; // espera máxima de la confirmación de SAVECAL
+
 // Tipo de orientación:
 //  false: ROTATION_VECTOR. Usa magnetómetro: el azimut es absoluto (norte magnético),
 //         no deriva, pero los imanes/hierro de motores y estructura lo distorsionan.
@@ -83,8 +97,8 @@ constexpr bool IMU_USE_GAME_ROTATION = false;
 // X coincide con la bisagra de elevacion, por eso no sirve como boresight.
 // (Si cambias el montaje o ya corriste CALAX con otro valor, usa BORE,x,y,z por UART.)
 constexpr double BORESIGHT_X = 0.0;
-constexpr double BORESIGHT_Y = 0.0;
-constexpr double BORESIGHT_Z = 1.0;
+constexpr double BORESIGHT_Y = 1.0;
+constexpr double BORESIGHT_Z = 0.0;
 
 // Referencia del azimut.
 //  true : azimut ABSOLUTO respecto al norte magnético, sin calibraciones manuales. El
@@ -102,6 +116,7 @@ constexpr bool AZ_ABSOLUTE_MAGNETIC = true;
 // Valor del lugar de uso: 0.08 deg E (+-0.37 deg), variando 0.18 deg W por año (NOAA/NCEI).
 // La deriva anual es menor que la incertidumbre del modelo: no hace falta actualizarlo.
 constexpr double MAG_DECLINATION_DEG = 0.08;
+constexpr double EL_OFFSET = -82;
 
 // ───────────────────────── Calibración de ejes (comando CALAX) ─────────────────────────
 // CALAX mueve cada eje ±CAL_SWEEP_DEG con los motores (lazo abierto, despejar el rotor) y mide

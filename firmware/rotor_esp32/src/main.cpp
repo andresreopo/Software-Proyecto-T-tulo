@@ -30,6 +30,13 @@
 //                  Resultado en líneas '# calax ...'.
 //   GET            pedir posición ahora              POS,<az>,<el>
 //   IMU            diagnóstico del sensor            línea con '#'
+//   ACC            precisión: fusión, error angular  línea con '#'
+//                  estimado (°) y magnetómetro (MagAcc 0..3)
+//   MAGCAL         calibrar el magnetómetro (figuras  ACK | ERR,busy | ERR,no_imu
+//                  de 8, rotor detenido); informa '# magcal ...' cada 0.5 s
+//   SAVECAL        guardar la calibración en la      ACK | ERR,busy | ERR,no_imu
+//                  flash del BNO085 (termina MAGCAL)
+//   ENDCAL         abortar MAGCAL sin guardar        ACK
 //   HELP           lista de comandos                 línea con '#'
 //
 //   ESP32 -> Interfaz (sin que la interfaz lo pida)
@@ -130,6 +137,8 @@ struct Pose {
   double rawAz = 0, rawEl = 0;  // sin offsets (para calibrar)
   double q[4] = {1, 0, 0, 0};   // quaternion del sensor (w,x,y,z), para CALAX
   float accuracyDeg = NAN;      // precisión estimada que informa el sensor
+  uint8_t fusionAcc = 0;        // calidad de la fusión: 0=Unreliable .. 3=High
+  uint8_t magAcc = 0;           // calibración del magnetómetro: 0=Unreliable .. 3=High
   uint32_t ms = 0;              // millis() de la última medición
   bool everValid = false;
 };
@@ -166,7 +175,7 @@ portMUX_TYPE poseMux = portMUX_INITIALIZER_UNLOCKED;   // protege pose y offsets
 MotionState sharedState;
 Pose sharedPose;
 double azOffset = cfg::MAG_DECLINATION_DEG;  // rumbo magnético -> norte verdadero (° + CAL si no es absoluto)
-double elOffset = -4;                         // corrección de elevación (°)
+double elOffset = cfg::EL_OFFSET;                         // corrección de elevación (°)
 // Eje de la antena en el marco del sensor. Parte con el valor de RotorConfig.h y CALAX lo
 // afina (se guarda en memoria). Protegido por poseMux.
 double boresight[3] = {cfg::BORESIGHT_X, cfg::BORESIGHT_Y, cfg::BORESIGHT_Z};
@@ -220,11 +229,111 @@ bool imuReady = false;
 uint32_t imuLastTryMs = 0;
 bool wireStarted = false;
 
-// Pide al sensor el reporte de orientación cada IMU_REPORT_US (la librería usa ms).
+// Rutina de calibración del magnetómetro. loop() solo deja una petición; la ejecuta
+// imuTask, que es la única tarea que toca el sensor por I2C.
+enum ImuRequest : uint8_t { ImuReqNone = 0, ImuReqMagCal, ImuReqSaveCal, ImuReqEndCal };
+volatile uint8_t imuRequest = ImuReqNone;  // protegida por poseMux
+volatile bool magCalActive = false;        // MAGCAL en curso: el rotor no se mueve
+uint32_t magCalLastMs = 0, magHighSinceMs = 0, saveStartMs = 0;  // solo imuTask
+bool magCalReadyShown = false;
+
+void requestImu(ImuRequest r) {
+  portENTER_CRITICAL(&poseMux);
+  imuRequest = r;
+  portEXIT_CRITICAL(&poseMux);
+}
+
+const char *accLabel(uint8_t a) {
+  static const char *const names[] = {"Unreliable", "Low", "Medium", "High"};
+  return a < 4 ? names[a] : "?";
+}
+
+// Pide al sensor la orientación cada IMU_REPORT_US y el magnetómetro (para MagAcc).
+// (La librería usa ms.)
 void imuEnableReport() {
   const uint16_t ms = static_cast<uint16_t>(cfg::IMU_REPORT_US / 1000 > 0 ? cfg::IMU_REPORT_US / 1000 : 1);
   if (cfg::IMU_USE_GAME_ROTATION) bno08x.enableGameRotationVector(ms);
   else bno08x.enableRotationVector(ms);
+  if (cfg::IMU_MAG_REPORT_US > 0 || magCalActive) {
+    const uint32_t magUs = cfg::IMU_MAG_REPORT_US > 0 ? cfg::IMU_MAG_REPORT_US : 50000;
+    bno08x.enableMagnetometer(static_cast<uint16_t>(magUs / 1000 > 0 ? magUs / 1000 : 1));
+  }
+}
+
+// Guarda en la pose compartida la precisión que informa el sensor.
+void updateSensorAccuracy() {
+  const uint8_t f = bno08x.getQuatAccuracy();
+  const uint8_t m = bno08x.getMagAccuracy();
+  portENTER_CRITICAL(&poseMux);
+  sharedPose.fusionAcc = f;
+  sharedPose.magAcc = m;
+  portEXIT_CRITICAL(&poseMux);
+}
+
+// Ejecuta las peticiones de MAGCAL / SAVECAL / ENDCAL que dejó loop().
+void serviceImuRequests(uint32_t now) {
+  uint8_t req;
+  portENTER_CRITICAL(&poseMux);
+  req = imuRequest;
+  imuRequest = ImuReqNone;
+  portEXIT_CRITICAL(&poseMux);
+  if (req == ImuReqMagCal) {
+    bno08x.calibrateMagnetometer();  // solo calibra el magnetómetro mientras dura MAGCAL
+    magCalActive = true;
+    magCalLastMs = 0;
+    magHighSinceMs = 0;
+    magCalReadyShown = false;
+    imuEnableReport();
+    note("magcal iniciada: mueve el sensor en figuras de 8, lejos de motores e imanes; espera Mag=High y envia SAVECAL");
+  } else if (req == ImuReqSaveCal) {
+    bno08x.saveCalibration();         // guarda la calibración (DCD) en la flash del sensor
+    bno08x.requestCalibrationStatus();
+    saveStartMs = now ? now : 1;
+    note("savecal: guardando en la flash del sensor, no muevas el sensor...");
+  } else if (req == ImuReqEndCal) {
+    bno08x.calibrateAll();            // vuelve la calibración dinámica de los 3 sensores
+    magCalActive = false;
+    saveStartMs = 0;
+    imuEnableReport();
+    note("magcal terminada sin guardar: calibracion dinamica restaurada");
+  }
+}
+
+// Avance de SAVECAL (espera la confirmación) y reporte periódico de MAGCAL.
+void serviceImuCalibration(uint32_t now) {
+  if (saveStartMs) {
+    if (now - saveStartMs >= 300 && bno08x.calibrationComplete()) {
+      saveStartMs = 0;
+      note("savecal: guardado confirmado por el sensor");
+      if (magCalActive) {
+        bno08x.calibrateAll();  // terminar MAGCAL: vuelve la calibración dinámica de los 3 sensores
+        magCalActive = false;
+        imuEnableReport();
+        note("magcal terminada: calibracion dinamica restaurada");
+      }
+    } else if (now - saveStartMs > cfg::MAGCAL_SAVE_TIMEOUT_MS) {
+      saveStartMs = 0;
+      note("savecal: SIN confirmacion del sensor; repite SAVECAL con el sensor quieto");
+    }
+  }
+  if (magCalActive && now - magCalLastMs >= cfg::MAGCAL_REPORT_MS) {
+    magCalLastMs = now;
+    const Pose p = poseSnapshot();
+    char msg[96];
+    snprintf(msg, sizeof(msg), "magcal mag=%s fusion=%s err=%.1fdeg",
+             accLabel(p.magAcc), accLabel(p.fusionAcc), p.accuracyDeg);
+    note(msg);
+    if (p.magAcc == 3) {
+      if (!magHighSinceMs) magHighSinceMs = now;
+      else if (!magCalReadyShown && now - magHighSinceMs >= cfg::MAGCAL_HIGH_HOLD_MS) {
+        magCalReadyShown = true;
+        note("magcal: magnetometro en High. Envia SAVECAL para guardar");
+      }
+    } else {
+      magHighSinceMs = 0;
+      magCalReadyShown = false;
+    }
+  }
 }
 
 // Convierte un quaternion en azimut/elevación de la antena y lo publica.
@@ -270,10 +379,21 @@ void imuPoll() {
   }
   if (bno08x.hasReset()) imuEnableReport();  // el sensor se reinició: volver a pedir datos
 
-  for (int n = 0; n < 8 && bno08x.dataAvailable(); ++n) {  // vaciar paquetes pendientes
-    publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
-                cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy());
+  serviceImuRequests(now);
+
+  bool gotData = false;
+  for (int n = 0; n < 8; ++n) {  // vaciar paquetes pendientes
+    const uint16_t id = bno08x.getReadings();  // id del reporte recibido (0 = nada)
+    if (id == 0) break;
+    gotData = true;
+    // Solo la orientación refresca la pose; el reporte del magnetómetro solo da MagAcc.
+    if (id == SENSOR_REPORTID_ROTATION_VECTOR || id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
+      publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
+                  cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy());
+    }
   }
+  if (gotData) updateSensorAccuracy();
+  serviceImuCalibration(now);
 }
 
 // Tarea del sensor (core 0): el I2C bloquea unos cientos de µs por lectura y aquí no
@@ -667,8 +787,11 @@ void sendLine(const char *message, int length) {
 void reportPosition() {
   const Pose pose = poseSnapshot();
   if (!poseFresh(pose, millis())) return;
-  char message[48];
-  const int length = snprintf(message, sizeof(message), "POS,%.2f,%.2f\n", pose.az, pose.el);
+  char message[72];
+  const int length = cfg::POS_INCLUDE_ACCURACY
+      ? snprintf(message, sizeof(message), "POS,%.2f,%.2f,%u,%.1f,%u\n", pose.az, pose.el,
+                 pose.fusionAcc, pose.accuracyDeg, pose.magAcc)
+      : snprintf(message, sizeof(message), "POS,%.2f,%.2f\n", pose.az, pose.el);
   if (length > 0 && length < static_cast<int>(sizeof(message))) sendLine(message, length);
 }
 
@@ -788,7 +911,7 @@ void processCalibration() {
 
 // Comprueba que se pueden aceptar SET/TRK; si no, responde el error y devuelve false.
 bool motionAllowed() {
-  if (motionSnapshot().calibrating) { uartError("busy"); return false; }
+  if (motionSnapshot().calibrating || magCalActive) { uartError("busy"); return false; }
   if (motionSnapshot().fault != FaultNone) { uartError("fault"); return false; }
   if (!poseFresh(poseSnapshot(), millis())) { uartError("no_imu"); return false; }
   return true;
@@ -848,7 +971,7 @@ void handleCommand(char *line) {
   } else if (strcmp(text, "CALAX") == 0) {
     const MotionState st = motionSnapshot();
     if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
-    else if (st.moving || st.calibrating || st.fault != FaultNone) uartError("busy");
+    else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else if (queueCommand(CommandType::CalAxes, 0, 0)) {
       controlUart.println("ACK");
       note("calax iniciada (~30 s): el rotor se movera +-grados en azimut y elevacion; STOP la aborta");
@@ -878,6 +1001,28 @@ void handleCommand(char *line) {
         note("boresight guardado; offset de elevacion a 0: ejecuta CALAX y luego CAL,0,<elevacion real>");
       }
     }
+  } else if (strcmp(text, "MAGCAL") == 0) {
+    const MotionState st = motionSnapshot();
+    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
+    else {
+      magCalActive = true;  // desde ya no se aceptan SET/TRK/CALAX
+      requestImu(ImuReqMagCal);
+      controlUart.println("ACK");
+    }
+  } else if (strcmp(text, "SAVECAL") == 0) {
+    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    else if (motionSnapshot().moving) uartError("busy");
+    else { requestImu(ImuReqSaveCal); controlUart.println("ACK"); }
+  } else if (strcmp(text, "ENDCAL") == 0) {
+    requestImu(ImuReqEndCal);
+    controlUart.println("ACK");
+  } else if (strcmp(text, "ACC") == 0) {
+    const Pose p = poseSnapshot();
+    char msg[112];
+    snprintf(msg, sizeof(msg), "acc fusion=%s(%u) err=%.1fdeg mag=%s(%u)",
+             accLabel(p.fusionAcc), p.fusionAcc, p.accuracyDeg, accLabel(p.magAcc), p.magAcc);
+    note(msg);
   } else if (strcmp(text, "GET") == 0) {
     reportPosition();
   } else if (strcmp(text, "IMU") == 0) {
@@ -896,8 +1041,11 @@ void handleCommand(char *line) {
     snprintf(msg, sizeof(msg), "imu boresight=(%.3f,%.3f,%.3f) azimut=%s declinacion=%.2f", bs[0], bs[1], bs[2],
              cfg::AZ_ABSOLUTE_MAGNETIC ? "absoluto(magnetico+decl)" : "relativo(CAL)", cfg::MAG_DECLINATION_DEG);
     note(msg);
+    snprintf(msg, sizeof(msg), "imu precision: fusion=%s mag=%s err=%.1fdeg", accLabel(p.fusionAcc),
+             accLabel(p.magAcc), p.accuracyDeg);
+    note(msg);
   } else if (strcmp(text, "HELP") == 0) {
-    note("SET,<az>,<el> | TRK,<az>,<el>,<vaz>,<vel> | CAL,<az>,<el> | ZERO | CALAX | BORE,<x>,<y>,<z> | GET | STOP | IMU | HELP");
+    note("SET,<az>,<el> | TRK,<az>,<el>,<vaz>,<vel> | CAL,<az>,<el> | ZERO | CALAX | BORE,<x>,<y>,<z> | MAGCAL | SAVECAL | ENDCAL | ACC | GET | STOP | IMU | HELP");
   } else {
     uartError("unknown_command");
   }

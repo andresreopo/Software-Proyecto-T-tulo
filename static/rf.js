@@ -16,9 +16,10 @@ bctx.fillStyle = css("--bg"); bctx.fillRect(0, 0, wfBuf.width, wfBuf.height);
 let cfg = {freq: 0, rate: 0, bw: 0};
 let N = 0;
 let smooth = null, peaks = null;
-// Integrador: promedio móvil exponencial de POTENCIA lineal (no de dB), con arranque en promedio acumulado.
-// Con M frames la desviación del ruido baja ≈ √M, así que las señales débiles emergen del piso.
+// Integrador: promedio móvil exponencial directo sobre el dato tal como llega (sin suponer escala), con arranque
+// en promedio acumulado. Con M frames la desviación del ruido baja ≈ √M, así que las señales débiles emergen del piso.
 let lin = null, integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noiseDb = null;
+let inStats = {min: 0, max: 0, bad: 0};
 function resetIntegration() { lin = null; integSeen = 0; noiseDb = null; if (smooth) peaks = Float32Array.from(smooth); }
 let lo = -120, hi = -20;
 let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
@@ -83,6 +84,7 @@ function estimateNoise(a) {
   const s = Float32Array.from(a.subarray(Math.floor(a.length * .1), Math.ceil(a.length * .9))).sort();
   return s[s.length >> 1];
 }
+const fmtIn = v => !Number.isFinite(v) ? "—" : Math.abs(v) >= 1e4 || (v !== 0 && Math.abs(v) < 0.01) ? v.toExponential(2) : v.toFixed(2);
 function peakIndex(a) { let k = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[k]) k = i; return k; }
 
 // ── Espectro ────────────────────────────────────────────────────────────────
@@ -126,7 +128,7 @@ function drawSpectrum() {
     sctx.save(); sctx.setLineDash([6, 4]); sctx.strokeStyle = css("--amber"); sctx.lineWidth = 1.2;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke(); sctx.restore();
     sctx.fillStyle = css("--amber"); sctx.font = "14px " + css("--mono"); sctx.textAlign = "right"; sctx.textBaseline = "bottom";
-    sctx.fillText("ruido " + noiseDb.toFixed(1) + " dB", g.x1 - 4, y - 2);
+    sctx.fillText("ruido " + fmtIn(noiseDb), g.x1 - 4, y - 2);
   }
 
   {
@@ -211,16 +213,22 @@ function onSpectrum(buf) {
   if (prevFrameT && nowT - prevFrameT < 2000) fps = fps ? 0.9 * fps + 0.1 * (1000 / (nowT - prevFrameT)) : 1000 / (nowT - prevFrameT);
   prevFrameT = nowT;
   if (!smooth || smooth.length !== N) { smooth = Float32Array.from(a); peaks = Float32Array.from(a); lin = null; }
-  if (!lin || lin.length !== N) { lin = new Float32Array(N); integSeen = 0; }
+  if (!lin || lin.length !== N) { lin = new Float64Array(N); integSeen = 0; }
+  // Estadística de entrada (y bins no finitos, que no deben contaminar el promedio)
+  let mn = Infinity, mx = -Infinity, bad = 0;
+  for (let i = 0; i < N; i++) { const v = a[i]; if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } else bad++; }
+  inStats = {min: mn, max: mx, bad};
+  if (!Number.isFinite(mn)) return;                       // frame sin ningún valor válido
+  const fill = integSeen === 0 && bad ? (Float32Array.from(a).filter(Number.isFinite).sort()[0 | (N - bad) / 2]) : 0;
   integSeen++;
   const alpha = 1 / Math.min(integM, integSeen);
   for (let i = 0; i < N; i++) {
-    const v = a[i];
-    if (Number.isFinite(v)) {
-      const p = Math.pow(10, v / 10);
-      lin[i] = integSeen === 1 ? p : lin[i] + alpha * (p - lin[i]);
+    let v = a[i];
+    if (!Number.isFinite(v)) { if (integSeen === 1) v = fill; else { v = null; } }
+    if (v !== null) {
+      lin[i] = integSeen === 1 ? v : lin[i] + alpha * (v - lin[i]);
     }
-    smooth[i] = 10 * Math.log10(lin[i] || 1e-30);
+    smooth[i] = lin[i];
     if (smooth[i] > peaks[i]) peaks[i] = smooth[i];
   }
   autoScale();
@@ -232,10 +240,12 @@ function onSpectrum(buf) {
     const pk = peakIndex(smooth), fpk = (cfg.freq - cfg.rate / 2 + pk / (N - 1) * cfg.rate) / 1e6;
     q("rx-peak-big").textContent = trimZeros(fpk, 4);
     noiseDb = estimateNoise(smooth);
-    q("rx-noise").textContent = noiseDb.toFixed(1);
-    q("rx-snr").textContent = (smooth[pk] - noiseDb).toFixed(1);
+    // El dato no se asume en dB: el ruido va en las unidades de entrada y el SNR como relación de potencia 10·log10(pico/ruido).
+    q("rx-noise").textContent = fmtIn(noiseDb);
+    q("rx-snr").textContent = smooth[pk] > 0 && noiseDb > 0 ? (10 * Math.log10(smooth[pk] / noiseDb)).toFixed(1) : "—";
     q("rx-integ-note").textContent = integM === 1 ? "Sin promedio" :
       `Promedio de ${integM} frames` + (fps > 0.5 ? ` ≈ ${(integM / fps).toFixed(integM / fps < 10 ? 1 : 0)} s` : "") + (integSeen < integM ? ` · acumulando ${integSeen}/${integM}` : "");
+    q("rx-integ-in").textContent = `Entrada: ${fmtIn(inStats.min)} … ${fmtIn(inStats.max)}` + (inStats.bad ? ` · ${inStats.bad} bins no válidos` : "");
     updatePill();
   }
 }

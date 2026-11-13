@@ -1,4 +1,7 @@
 # Comentarios de versión
+V11:
+- Fix de filtro promedio movil
+- Incorporación de rutina de calibración y reporte de accuracy magnetómetro
 
 V10:
 - Incorporación de filtro por horario de pase para planificación de observaciones
