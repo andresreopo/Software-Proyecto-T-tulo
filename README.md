@@ -1,4 +1,5 @@
 # Comentarios de versión
+# SATTRACK
 V11:
 - Fix de filtro promedio movil
 - Incorporación de rutina de calibración y reporte de accuracy magnetómetro
@@ -34,6 +35,13 @@ V5:
 - Se incorpora conexión real a pluto y se añade el script ```mock_maia.py``` que permite simular una pluto de forma externa.
 - Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
 
+# FIRMWARE
+
+V5: Se añade rutina de calibración para BNO
+
+V4: Se corrigen errores asociados al inicio del BNO
+
+V3: Correcciones a vector de elevación
 
 # SATTRACK (simulación + monitor RF Maia)
 
