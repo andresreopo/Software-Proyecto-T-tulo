@@ -337,8 +337,7 @@ void serviceImuCalibration(uint32_t now) {
 }
 
 // Convierte un quaternion en azimut/elevación de la antena y lo publica.
-void publishPose(double w, double x, double y, double z, float accuracyRad,
-                 uint8_t accuracyStatus) {
+void publishPose(double w, double x, double y, double z, float accuracyRad) {
   double rawAz, rawEl;
   double b[3];
   portENTER_CRITICAL(&poseMux);
@@ -353,8 +352,6 @@ void publishPose(double w, double x, double y, double z, float accuracyRad,
   sharedPose.az = RotorMath::normalizeAzimuth(rawAz + azOffset);
   sharedPose.el = rawEl + elOffset;
   sharedPose.accuracyDeg = accuracyRad * static_cast<float>(180.0 / M_PI);
-  sharedPose.accuracyStatus = accuracyStatus;
-  ++sharedPose.sampleId;
   sharedPose.ms = now;
   sharedPose.everValid = true;
   portEXIT_CRITICAL(&poseMux);
@@ -780,11 +777,9 @@ void uartError(const char *error) {
 
 // Escribe una línea solo si cabe en el buffer de salida: un lector serial lento no
 // debe bloquear la lectura de comandos.
-bool sendLine(const char *message, int length) {
+void sendLine(const char *message, int length) {
   if (length > 0 && controlUart.availableForWrite() >= length)
-    return controlUart.write(reinterpret_cast<const uint8_t *>(message), length) ==
-           static_cast<size_t>(length);
-  return false;
+    controlUart.write(reinterpret_cast<const uint8_t *>(message), length);
 }
 
 // Envía "POS,<az>,<el>\n" con la posición MEDIDA. Sin medición reciente no se envía:
@@ -806,23 +801,6 @@ void reportBattery() {
   char message[24];
   const int length = snprintf(message, sizeof(message), "BAT,%.2f\n", batteryVolts);
   if (length > 0 && length < static_cast<int>(sizeof(message))) sendLine(message, length);
-}
-
-// Reporta una muestra nueva desde loop(), con prioridad para POS y BAT.
-void reportBno() {
-  static uint32_t lastSampleId = 0;
-  const Pose pose = poseSnapshot();
-  if (!poseFresh(pose, millis()) || pose.sampleId == lastSampleId) return;
-
-  char message[128];
-  const int length = snprintf(
-      message, sizeof(message), "BNO,%lu,%lu,%.7f,%.7f,%.7f,%.7f,%u,%.5f,%.5f,%.5f\n",
-      static_cast<unsigned long>(pose.ms), static_cast<unsigned long>(pose.sampleId),
-      pose.q[0], pose.q[1], pose.q[2], pose.q[3],
-      static_cast<unsigned int>(pose.accuracyStatus), pose.accuracyDeg,
-      pose.rawAz, pose.rawEl);
-  if (length > 0 && length < static_cast<int>(sizeof(message)) && sendLine(message, length))
-    lastSampleId = pose.sampleId;
 }
 
 // Si el movimiento se declaró en falla, avisa una vez por la interfaz.
@@ -1178,13 +1156,6 @@ void loop() {
   if (now - lastBatteryAt >= cfg::BAT_PERIOD_MS) {
     lastBatteryAt = now;
     reportBattery();
-  }
-  if (cfg::PRINT_BNO_DATA) {
-    static uint32_t lastBnoAt = 0;
-    if (now - lastBnoAt >= cfg::BNO_PRINT_PERIOD_MS) {
-      lastBnoAt = now;
-      reportBno();
-    }
   }
   delay(1);
 }

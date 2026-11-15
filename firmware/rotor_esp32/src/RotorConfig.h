@@ -63,8 +63,6 @@ constexpr uint8_t IMU_ADDRESS = 0x4B;      // 0x4B si el pin SA0/DI está en alt
 constexpr uint32_t IMU_REPORT_US = 10000;  // un dato cada 10 ms (100 Hz)
 // Sin datos del sensor por este tiempo -> los motores frenan y se deja de enviar POS.
 constexpr uint32_t IMU_TIMEOUT_MS = 300;
-constexpr bool PRINT_BNO_DATA = true;           // true habilita las tramas seriales BNO.
-constexpr uint32_t BNO_PRINT_PERIOD_MS = 50;    // Captura de la última muestra, hasta 20 Hz.
 
 // Precisión del sensor: estado de calibración del magnetómetro (MagAcc) y de la fusión.
 // Niveles: 0=Unreliable 1=Low 2=Medium 3=High. El magnetómetro se pide a este período solo

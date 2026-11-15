@@ -42,45 +42,6 @@ enviar y la interfaz la marca obsoleta), `BAT,<V>` cada 1 s, líneas `#` de diag
 Motivos de `ERR`: `formato`, `invalid_target`, `queue_full`, `busy`, `no_imu`, `fault`,
 `fault_az`/`fault_el`, `unknown_command`, `line_too_long`, `line_timeout`, `invalid_character`.
 
-## Captura del BNO en CSV
-
-El booleano `PRINT_BNO_DATA` en `src/RotorConfig.h` viene en `true`.
-El firmware envía una muestra nueva cada 50 ms como máximo, cuando hay espacio
-en el búfer serial. Cambia el valor a `false` y vuelve a cargar el firmware
-para desactivar estas líneas. Los mensajes POS y BAT conservan su formato y
-frecuencia.
-
-```text
-BNO,esp_ms,muestra,qw,qx,qy,qz,estado_precision,error_estimado_deg,az_sin_offset_deg,el_sin_offset_deg
-```
-
-`esp_ms` y `muestra` cuentan desde el arranque del ESP32. El cuaternión y el
-estado de precisión (0 a 3) provienen del BNO. Los dos ángulos se calculan con
-el eje de la antena antes de aplicar los offsets. El CSV añade `pc_utc` al
-recibir cada muestra y deja vacíos los valores que el firmware informa como
-`nan`.
-
-Después de cargar el firmware, ejecuta uno de estos comandos en PowerShell
-desde la raíz del proyecto Python. Sustituye COM6 por el puerto de tu ESP32.
-Cada comando crea un CSV nuevo y escribe los registros a medida que llegan.
-
-Para capturar con el puerto libre, cierra el monitor serial y desconecta el
-rotor de SatTrack antes de ejecutar el capturador.
-
-```powershell
-.\.venv\Scripts\python.exe .\capturar_bno.py --port COM6 --output .\bno.csv
-```
-
-Para capturar mientras controlas el rotor con SatTrack, inicia la aplicación
-con el CSV y deja que SatTrack sea quien abra el puerto.
-
-```powershell
-.\.venv\Scripts\python.exe .\app.py --serial-port COM6 --bno-csv .\bno_sattrack.csv
-```
-
-Detén la captura con Ctrl+C. El capturador y la opción de SatTrack guardan
-únicamente líneas `BNO,` válidas. Usa otro nombre para una captura nueva.
-
 ## Control
 - **SET:** velocidad proporcional al error, limitada por la rampa de frenado `sqrt(2·a·error)` para no
   pasarse; dentro de `GOTO_DEADBAND_DEG` se detiene y vigila (corrige si el sensor ve una desviación).
