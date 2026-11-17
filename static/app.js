@@ -72,7 +72,7 @@ async function loadCatalog(resetPage = false) {
   if (resetPage) page = 1;
   const sequence = ++querySequence;
   $("catalog-summary").textContent = "Calculando catálogo…";
-  const params = new URLSearchParams({...observer(), q:$("search").value.trim(), band:$("sband-only").checked ? "s" : "all", visible:$("visible-only").checked ? "1" : "0", page:String(page), page_size:"40"});
+  const params = new URLSearchParams({...observer(), q:$("search").value.trim(), band:(($("sband-only").checked ? "s" : "") + ($("lband-only").checked ? "l" : "")) || "all", visible:$("visible-only").checked ? "1" : "0", page:String(page), page_size:"40"});
   if ($("hour-enabled").checked) { params.set("hour_from", String(Number($("hour-from").value) * 30)); params.set("hour_to", String(Number($("hour-to").value) * 30)); }
   try {
     const data = await api("/api/catalog?" + params);
@@ -124,7 +124,7 @@ function renderSelected(sat) {
   $("selected-el").textContent = fmt(sat.current.el_deg, 1) + "°";
   $("selected-az").textContent = fmt(sat.current.az_deg, 1) + "°";
   $("selected-period").textContent = fmt(sat.orbit.period_min, 1) + " min";
-  const tx = sat.transmitters.filter(x => x.frequency_mhz >= 2000 && x.frequency_mhz <= 4000);
+  const tx = sat.transmitters.filter(x => x.frequency_mhz >= 1600 && x.frequency_mhz <= 4000);
   const select = $("transmitter"); select.replaceChildren();
   for (const item of tx) {
     const option = document.createElement("option"); option.value = item.uuid || ""; option.dataset.mhz = item.frequency_mhz;
@@ -135,7 +135,7 @@ function renderSelected(sat) {
   if (!tx.length) select.value = "manual";
   select.disabled = false;
   $("manual-wrap").hidden = select.value !== "manual";
-  // Receptor RF: sin bajada en banda S se usa la primera bajada catalogada que el AD9361 pueda sintonizar (70–6000 MHz).
+  // Receptor RF: sin bajada en banda L/S se usa la primera bajada catalogada que el AD9361 pueda sintonizar (70–6000 MHz).
   rfFallbackMHz = (sat.transmitters.map(x => x.frequency_mhz).find(f => f >= 70 && f <= 6000)) ?? null;
   tuneRf(sat.name);
   $("start-session").disabled = sat.passes.length === 0;
@@ -299,6 +299,7 @@ setInterval(() => { if (latest && !$("panel-track").hidden) drawSky(); }, 250);
 let searchTimer;
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadCatalog(true),250);});
 $("sband-only").addEventListener("change",()=>loadCatalog(true));
+$("lband-only").addEventListener("change",()=>loadCatalog(true));
 $("visible-only").addEventListener("change",()=>loadCatalog(true));
 // ── Franja horaria de observación (control deslizante de 2 puntos, pasos de 30 min) ──
 const halfHour = v => { const m = Number(v) * 30; return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); };

@@ -21,7 +21,6 @@ hacia la referencia a velocidad finita.
 """
 
 import collections
-import logging
 import math
 import queue
 import threading
@@ -32,7 +31,6 @@ import serial
 from serial.tools import list_ports as _list_ports
 
 import rotor_config as config
-from capturar_bno import BNO_PREFIX
 
 SIM_PORT = "sim"
 
@@ -177,7 +175,6 @@ class SimPort:
 class SerialLink:
     def __init__(self, on_event: Optional[Callable[[dict], None]] = None):
         self._on_event = on_event or (lambda e: None)
-        self.on_bno_sample: Optional[Callable[[bytes], bool]] = None
         self._lock  = threading.Lock()      # estado
         self._wlock = threading.Lock()      # escritura al puerto
         self._gen = 0                       # cada connect()/disconnect() invalida el hilo anterior
@@ -372,15 +369,6 @@ class SerialLink:
             pass
 
     def _handle(self, raw: bytes):
-        if raw.startswith(BNO_PREFIX):
-            capture = self.on_bno_sample
-            if capture is not None:
-                try:
-                    capture(raw)
-                except OSError:
-                    self.on_bno_sample = None
-                    logging.exception("Se detuvo la captura BNO por un error al escribir el CSV")
-            return
         self._io("rx", raw.decode("utf-8", "replace").strip())
         parsed = parse_line(raw.decode("utf-8", "replace"))
         if parsed is None:

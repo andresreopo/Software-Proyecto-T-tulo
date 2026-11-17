@@ -57,7 +57,8 @@
           <label class="search-label" for="search">Buscar por nombre o NORAD</label>
           <input id="search" type="search" placeholder="Ej. PROBA-2 o 36037" autocomplete="off">
           <div class="filter-row">
-            <label><input id="sband-only" type="checkbox" checked> Banda S</label>
+            <label><input id="sband-only" type="checkbox" checked> Banda S <small>2000–4000</small></label>
+            <label><input id="lband-only" type="checkbox"> Banda L <small>1600–2000</small></label>
             <label><input id="visible-only" type="checkbox"> Visibles ahora</label>
           </div>
           <div class="hour-filter">
@@ -90,8 +91,8 @@
             <div><small>Periodo orbital</small><strong id="selected-period">—</strong></div>
           </div>
           <div class="selection-controls">
-            <label class="frequency-field">Bajada banda S<select id="transmitter" disabled><option>Elige un satélite</option></select></label>
-            <label id="manual-wrap" class="manual-field" hidden>Frecuencia manual simulada (MHz)<input id="manual-frequency" type="number" min="2000" max="4000" step="0.001" placeholder="2235.000"></label>
+            <label class="frequency-field">Bajada L/S<select id="transmitter" disabled><option>Elige un satélite</option></select></label>
+            <label id="manual-wrap" class="manual-field" hidden>Frecuencia manual simulada (MHz)<input id="manual-frequency" type="number" min="1600" max="4000" step="0.001" placeholder="2235.000"></label>
             <label class="speed-field">Velocidad<select id="speed"><option value="1">1×</option><option value="5">5×</option><option value="10" selected>10×</option><option value="20">20×</option></select></label>
             <button id="start-session" class="button primary" disabled>▶ Iniciar próximo pase</button>
           </div>
@@ -168,6 +169,14 @@
                 <small>FRECUENCIA CURSOR</small>
                 <strong id="rx-cursor-freq">—</strong>
                 <span class="rf-peak-unit">MHz</span>
+              </div>
+              <div class="rf-sweep card-inset">
+                <label class="rf-check"><input type="checkbox" id="rx-sweep"> Barrido de frecuencia central</label>
+                <div class="rf-sweep-params">
+                  <label>Ancho ± <span>MHz</span><input id="rx-sweep-width" type="number" min="0.1" max="100" step="any" value="10"></label>
+                  <label>Velocidad <span>MHz/s</span><input id="rx-sweep-speed" type="number" min="0.05" max="100" step="any" value="1"></label>
+                </div>
+                <small id="rx-sweep-note" class="rf-note">Inactivo</small>
               </div>
               <div class="rf-integ card-inset">
                 <label>Integración <span>frames</span>

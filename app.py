@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import atexit
 import json
 import math
 import os
-from pathlib import Path
 import queue
 import threading
 
@@ -15,7 +13,6 @@ from flask import Flask, jsonify, render_template, request, Response
 from flask_sock import Sock
 
 import gps_config
-from capturar_bno import BnoCsv
 from catalog import store
 from gps_link import gps
 from orbit import UTC, find_passes, position
@@ -124,7 +121,7 @@ def catalog():
         page = int(request.args.get("page", 1))
         page_size = int(request.args.get("page_size", 40))
         band = request.args.get("band", "s")
-        if page < 1 or page_size < 1 or page_size > 100 or band not in ("s", "all"):
+        if page < 1 or page_size < 1 or page_size > 100 or band not in ("s", "l", "sl", "all"):
             raise ValueError("Filtro o paginación inválidos")
         hours = None
         if request.args.get("hour_from") is not None or request.args.get("hour_to") is not None:
@@ -187,9 +184,9 @@ def start_session():
             try:
                 frequency = float(body.get("manual_frequency_mhz"))
             except (TypeError, ValueError) as exc:
-                raise ValueError("Elige una bajada S o indica una frecuencia simulada") from exc
-            if not math.isfinite(frequency) or not 2000 <= frequency <= 4000:
-                raise ValueError("La frecuencia manual debe estar entre 2000 y 4000 MHz")
+                raise ValueError("Elige una bajada L/S o indica una frecuencia simulada") from exc
+            if not math.isfinite(frequency) or not 1600 <= frequency <= 4000:
+                raise ValueError("La frecuencia manual debe estar entre 1600 y 4000 MHz")
             transmitter = {"frequency_mhz": frequency, "mode": "Sin confirmar", "source": "manual"}
         else:
             transmitter = {**transmitter, "source": "SatNOGS DB"}
@@ -520,22 +517,12 @@ if __name__ == "__main__":
                              "También: variable MAIA_SERVER_URL")
     parser.add_argument("--serial-port", help="Puerto serial de la ESP32 a abrir al iniciar (COM5, /dev/ttyUSB0 o sim)")
     parser.add_argument("--serial-baud", type=int, default=rotor_config.SERIAL_BAUD)
-    parser.add_argument("--bno-csv", type=Path,
-                        help="Guardar las muestras BNO de la conexión del rotor en un CSV nuevo")
     parser.add_argument("--gps-port", default=os.getenv("SATTRACK_GPS_PORT"),
                         help=f"Puerto serial del GPS (por defecto {gps_config.GPS_PORT} si existe; sim = GPS simulado). "
                              "También: variable SATTRACK_GPS_PORT")
     parser.add_argument("--gps-baud", type=int, default=gps_config.GPS_BAUD)
     parser.add_argument("--no-gps", action="store_true", help="No usar GPS: la posición de la estación es solo manual")
     args = parser.parse_args()
-    if args.bno_csv is not None:
-        try:
-            capture = BnoCsv(args.bno_csv)
-        except OSError as exc:
-            parser.error(f"No se pudo crear el CSV del BNO: {exc}")
-        rotor.on_bno_sample = capture.write
-        atexit.register(capture.close)
-        print(f"[SATTRACK] Captura BNO en {args.bno_csv.resolve()}")
     if not args.no_gps:
         gps_port = args.gps_port or (gps_config.GPS_PORT if os.path.exists(gps_config.GPS_PORT) else None)
         if gps_port:

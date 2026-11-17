@@ -1,5 +1,9 @@
 # Comentarios de versión
 # SATTRACK
+V12:
+- Filtro de banda L añadido
+- Incorporación de barrido en frecuencia
+
 V11:
 - Fix de filtro promedio movil
 - Incorporación de rutina de calibración y reporte de accuracy magnetómetro

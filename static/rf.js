@@ -305,9 +305,59 @@ async function applyConfig(body, quiet = false) {
     fillForm(await request("PATCH", body));
     resetIntegration();                 // otra Fc/muestreo: el promedio anterior ya no corresponde
     rangeInit = false;
-    log("Configuración aplicada: Fc " + fmtHz(cfg.freq) + ", SR " + fmtHz(cfg.rate));
+    if (!quiet) log("Configuración aplicada: Fc " + fmtHz(cfg.freq) + ", SR " + fmtHz(cfg.rate));
   } catch (e) { log(e.message); if (!quiet && typeof toast === "function") toast(e.message); loadConfig(); }
 }
+// ── Barrido de frecuencia central ±ancho mientras la casilla esté marcada ───────────────────────────
+// Triángulo continuo base−ancho … base+ancho a la velocidad indicada (MHz/s); sirve para comprobar que hay señal.
+// Cada paso es un PATCH a Maia, así que el paso es de 1 MHz y el intervalo sale de step/velocidad; si eso bajara
+// de SWEEP_MIN_MS, se fija el intervalo y se agranda el paso. Al desmarcar la casilla la Fc vuelve a la base.
+// Si cambias la Fc a mano durante el barrido, esa pasa a ser la base. No depende de que haya seguimiento activo.
+const SWEEP_STEP_HZ = 1e6, SWEEP_MIN_MS = 300;
+let sweepBase = null, sweepLast = null, sweepOff = 0, sweepDir = 1, sweepBusy = false;
+function sweepParams() {
+  const w = parseFloat(q("rx-sweep-width").value), v = parseFloat(q("rx-sweep-speed").value);
+  const width = Number.isFinite(w) ? Math.min(100, Math.max(0.1, w)) * 1e6 : 10e6;     // Hz, semiancho
+  const speed = Number.isFinite(v) ? Math.min(100, Math.max(0.05, v)) * 1e6 : 1e6;      // Hz/s
+  let ms = SWEEP_STEP_HZ / speed * 1000, step = SWEEP_STEP_HZ;
+  if (ms < SWEEP_MIN_MS) { ms = SWEEP_MIN_MS; step = speed * ms / 1000; }
+  return {width, speed, step, ms: Math.min(ms, 10000)};
+}
+function sweepNote(t) { q("rx-sweep-note").textContent = t; }
+let sweepTimer = null;
+async function sweepTick() {
+  clearTimeout(sweepTimer);
+  const prm = sweepParams();
+  sweepTimer = setTimeout(sweepTick, prm.ms);          // se reprograma con los parámetros vigentes en cada paso
+  const on = q("rx-sweep").checked;
+  if (sweepBusy) return;
+  if (!on) {
+    if (sweepBase !== null) {
+      sweepBusy = true;
+      const base = sweepBase; sweepBase = null; sweepLast = null;
+      if (cfg.freq !== base) await applyConfig({rx_lo_frequency: base}, true);
+      sweepBusy = false; log("Barrido detenido: Fc restituida a " + fmtHz(base) + ".");
+    }
+    sweepNote("Inactivo");
+    return;
+  }
+  if (!cfg.rate) { sweepNote("Esperando a Maia…"); return; }
+  if (sweepBase === null || cfg.freq !== sweepLast) {          // inicio, o Fc cambiada desde fuera: nueva base
+    sweepBase = cfg.freq; sweepOff = 0; sweepDir = 1;
+    if (sweepLast === null) log("Barrido de Fc iniciado: " + fmtHz(sweepBase) + " ± " + fmtHz(prm.width) + " a " + trimZeros(prm.speed / 1e6, 2) + " MHz/s.");
+  }
+  sweepOff += sweepDir * prm.step;
+  if (sweepOff >= prm.width) { sweepOff = prm.width; sweepDir = -1; } else if (sweepOff <= -prm.width) { sweepOff = -prm.width; sweepDir = 1; }
+  if (Math.abs(sweepOff) > prm.width) sweepOff = Math.sign(sweepOff) * prm.width;   // el ancho se redujo con el barrido en curso
+  const hz = Math.min(6000e6, Math.max(70e6, sweepBase + sweepOff));
+  sweepBusy = true;
+  await applyConfig({rx_lo_frequency: Math.round(hz)}, true);
+  sweepLast = cfg.freq; sweepBusy = false;
+  sweepNote(`Barriendo: Fc ${fmtHz(cfg.freq)} (base ${fmtHz(sweepBase)}, ${sweepOff >= 0 ? "+" : "−"}${trimZeros(Math.abs(sweepOff) / 1e6, 2)} MHz)`);
+}
+q("rx-sweep").addEventListener("change", sweepTick);
+sweepTimer = setTimeout(sweepTick, 700);
+
 // Llamado desde app.js al elegir satélite/transmisor: centra el receptor en esa frecuencia (rango AD9361: 70–6000 MHz).
 window.rfTune = async (mhz, label) => {
   if (!Number.isFinite(mhz) || mhz < 70 || mhz > 6000) { log("Frecuencia fuera del rango del AD9361 (70–6000 MHz): " + mhz); return false; }

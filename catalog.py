@@ -13,6 +13,7 @@ from skyfield.api import EarthSatellite, load, wgs84
 
 
 CHILE = ZoneInfo("America/Santiago")
+BAND_RANGES = {"l": (1600.0, 2000.0), "s": (2000.0, 4000.0)}   # MHz
 WINDOW_STEP_MIN = 2   # paso de muestreo para el filtro por franja horaria
 DATA = Path(__file__).resolve().parent / "data"
 CELESTRAK = "https://celestrak.org/NORAD/elements/gp.php"
@@ -93,7 +94,10 @@ class CatalogStore:
         with self.lock:
             return self.by_id.get(int(norad))
 
-    def transmitters_for(self, norad, band_only=False):
+    def transmitters_for(self, norad, band_only=False, ranges=None):
+        """`band_only` = solo bajadas L+S (1600–4000 MHz), las que admite la sesión; `ranges` = lista de (min, max) MHz."""
+        if ranges is None and band_only:
+            ranges = [BAND_RANGES["l"], BAND_RANGES["s"]]
         with self.lock:
             records = list(self.tx_by_id.get(int(norad), []))
         result = []
@@ -105,7 +109,7 @@ class CatalogStore:
                 upper = float(high if high is not None else low) / 1e6
             except (TypeError, ValueError):
                 continue
-            if band_only and not (2000 <= freq <= 4000):
+            if ranges is not None and not any(lo <= freq <= hi for lo, hi in ranges):
                 continue
             result.append({
                 "uuid": tx.get("uuid"),
@@ -126,9 +130,10 @@ class CatalogStore:
         with self.lock:
             records = list(self.by_id.values())
             tx_ids = set(self.tx_by_id)
-        if band == "s":
+        ranges = None if band == "all" else [BAND_RANGES[b] for b in band if b in BAND_RANGES]   # "s", "l", "sl" o "all"
+        if ranges:
             records = [r for r in records if int(r["NORAD_CAT_ID"]) in tx_ids
-                       and self.transmitters_for(int(r["NORAD_CAT_ID"]), band_only=True)]
+                       and self.transmitters_for(int(r["NORAD_CAT_ID"]), ranges=ranges)]
         if query:
             records = [r for r in records if query in str(r.get("OBJECT_NAME", "")).casefold()
                        or query in str(r["NORAD_CAT_ID"])]
@@ -162,7 +167,7 @@ class CatalogStore:
                 el = float(elevation.degrees)
                 if visible_only and el < observer["min_el"]:
                     continue
-                tx = self.transmitters_for(int(record["NORAD_CAT_ID"]), band_only=True)
+                tx = self.transmitters_for(int(record["NORAD_CAT_ID"]), band_only=ranges is None, ranges=ranges)
                 items.append({
                     "norad_id": int(record["NORAD_CAT_ID"]),
                     "name": record.get("OBJECT_NAME") or f"NORAD {record['NORAD_CAT_ID']}",
