@@ -259,3 +259,4 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .dual-range input[type=range]::-moz-range-thumb{pointer-events:auto;width:18px;height:18px;border-radius:50%;background:#fff;border:2px solid var(--cyan);cursor:pointer}
 .dual-range input[type=range]::-webkit-slider-runnable-track{background:none}.dual-range input[type=range]::-moz-range-track{background:none}
 .hour-filter.off .dual-range{opacity:.45}
+.rf-tracking{color:#1e3241;font-weight:700;line-height:1.2;padding:2px 4px 6px;overflow-wrap:anywhere}

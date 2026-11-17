@@ -8,6 +8,7 @@ import math
 import os
 import queue
 import threading
+from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, Response
 from flask_sock import Sock
@@ -81,6 +82,24 @@ def observer_from(values):
     return observer
 
 
+def hour_filter(values):
+    if values.get("hour_from") is None and values.get("hour_to") is None:
+        return None
+    start, end = int(values.get("hour_from", 0)), int(values.get("hour_to", 1440))
+    if not 0 <= start < end <= 1440:
+        raise ValueError("Intervalo horario inválido")
+    return start, end
+
+
+def azimuth_filter(values):
+    if values.get("az_from") is None and values.get("az_to") is None:
+        return None
+    start, end = float(values.get("az_from", 0)), float(values.get("az_to", 360))
+    if not (0 <= start <= 360 and 0 <= end <= 360):
+        raise ValueError("Los límites de azimut deben estar entre 0° y 360°")
+    return None if (start, end) == (0, 360) else (start, end)
+
+
 def error(message, code=400):
     return jsonify({"ok": False, "error": str(message)}), code
 
@@ -123,14 +142,9 @@ def catalog():
         band = request.args.get("band", "s")
         if page < 1 or page_size < 1 or page_size > 100 or band not in ("s", "l", "sl", "all"):
             raise ValueError("Filtro o paginación inválidos")
-        hours = None
-        if request.args.get("hour_from") is not None or request.args.get("hour_to") is not None:
-            h_from, h_to = int(request.args.get("hour_from", 0)), int(request.args.get("hour_to", 1440))
-            if not (0 <= h_from < h_to <= 1440):
-                raise ValueError("Intervalo horario inválido")
-            hours = (h_from, h_to)
         data = store.search(request.args.get("q", ""), band,
-                            request.args.get("visible") == "1", observer, page, page_size, hours)
+                            request.args.get("visible") == "1", observer, page, page_size,
+                            hour_filter(request.args), azimuth_filter(request.args))
         return jsonify({"ok": True, **data, "observer": observer, "catalog": store.status()})
     except ValueError as exc:
         return error(exc)
@@ -143,8 +157,8 @@ def satellite_detail(norad_id):
         record = store.record(norad_id)
         if record is None:
             return error("Satélite no encontrado en el catálogo orbital", 404)
-        from datetime import datetime
         now = datetime.now(UTC)
+        azimuth = azimuth_filter(request.args)
         return jsonify({"ok": True, "satellite": {
             "norad_id": norad_id,
             "name": record.get("OBJECT_NAME"),
@@ -153,7 +167,8 @@ def satellite_detail(norad_id):
             "orbit": {"inclination_deg": record.get("INCLINATION"),
                       "period_min": round(1440 / float(record["MEAN_MOTION"]), 2)},
             "current": position(record, observer, now),
-            "passes": find_passes(record, observer, start=now, days=5, limit=8),
+            "passes": find_passes(record, observer, start=now, days=1 if azimuth else 5, limit=8,
+                                  azimuth=azimuth, hours=hour_filter(request.args) if azimuth else None),
             "transmitters": store.transmitters_for(norad_id),
             "catalog": store.status(),
         }})
@@ -190,7 +205,9 @@ def start_session():
             transmitter = {"frequency_mhz": frequency, "mode": "Sin confirmar", "source": "manual"}
         else:
             transmitter = {**transmitter, "source": "SatNOGS DB"}
-        session = SimulationSession(record, observer, transmitter, speed)
+        azimuth = azimuth_filter(body)
+        session = SimulationSession(record, observer, transmitter, speed, azimuth=azimuth,
+                                    hours=hour_filter(body) if azimuth else None)
         follower.stop(hold=True)                       # una sesión nueva reemplaza al seguimiento anterior
         sessions.add(session)
         follow_error = None
@@ -287,7 +304,9 @@ def ws_rf(ws):
 
 @app.get("/api/rf/status")
 def rf_status():
-    return jsonify({"ok": True, **maia_rf.snapshot(), "server_url": maia_rf.base_url})
+    session = sessions.current()
+    tracking = session.tracking_status() if session else None
+    return jsonify({"ok": True, **maia_rf.snapshot(), "server_url": maia_rf.base_url, "tracking": tracking})
 
 
 @app.get("/api/rf/config")

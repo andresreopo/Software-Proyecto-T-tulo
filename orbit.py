@@ -6,6 +6,7 @@ import datetime as dt
 import math
 from zoneinfo import ZoneInfo
 
+import numpy as np
 from skyfield.api import EarthSatellite, load, wgs84
 
 
@@ -59,11 +60,46 @@ def range_rate_km_s(record, observer, when):
     return float(distance_after - distance_before) / 2
 
 
-def find_passes(record, observer, start=None, days=5, limit=12):
+def _in_hour_window(rise, setting, start, end, hours):
+    if hours is None:
+        return True
+    first = max(rise, start).astimezone(CHILE)
+    last = min(setting, end).astimezone(CHILE)
+    midnight = first.replace(hour=0, minute=0, second=0, microsecond=0)
+    while midnight.date() <= last.date():
+        opening = midnight + dt.timedelta(minutes=hours[0])
+        closing = midnight + dt.timedelta(minutes=hours[1])
+        if max(first, opening) < min(last, closing):
+            return True
+        midnight += dt.timedelta(days=1)
+    return False
+
+
+def _within_azimuth(topo, rise, setting, azimuth):
+    if azimuth is None:
+        return True
+    az_from, az_to = azimuth
+    span = az_to - az_from if az_to >= az_from else az_to + 360 - az_from
+    if span == 360:
+        return True
+    count = min(4096, max(2, math.ceil((setting - rise) * 86400) + 1))
+    times = rise + np.linspace(0.0, setting - rise, count)
+    # Igual que en EarthSatellite.find_events: las rotaciones de precesión y
+    # nutación se cancelan al calcular alt/az de un satélite SGP4 desde la Tierra.
+    times.gast = np.zeros(count)
+    times.M = times.MT = np.eye(3)
+    offsets = (topo.at(times).altaz()[1].degrees - az_from) % 360.0
+    # En el arco permitido los desplazamientos son continuos. Un salto cerca
+    # del extremo inicial del arco delata un cruce entre dos muestras.
+    return bool(np.all(offsets <= span) and np.all(np.abs(np.diff(offsets)) <= 180.0))
+
+
+def find_passes(record, observer, start=None, days=5, limit=12, azimuth=None, hours=None):
     start = start or dt.datetime.now(UTC)
     end = start + dt.timedelta(days=days)
     sat = spacecraft(record)
     obs = station(observer)
+    topo = sat - obs
     threshold = observer["min_el"]
     times, events = sat.find_events(
         obs,
@@ -73,11 +109,12 @@ def find_passes(record, observer, start=None, days=5, limit=12):
     )
     pending = None
     passes = []
+    found_pass = False
     for moment, event in zip(times, events):
         if event == 0:
             pending = {"aos": moment, "peak": None, "max_el": -90.0}
         elif event == 1 and pending is not None:
-            el, _, _ = (sat - obs).at(moment).altaz()
+            el, _, _ = topo.at(moment).altaz()
             if el.degrees > pending["max_el"]:
                 pending["peak"] = moment
                 pending["max_el"] = float(el.degrees)
@@ -85,27 +122,34 @@ def find_passes(record, observer, start=None, days=5, limit=12):
             rise, peak = pending["aos"], pending["peak"]
             peak_el = pending["max_el"]
             pending = None
-            if peak is None or _utc(moment) <= start or _utc(rise) >= end:
+            rise_at, set_at = _utc(rise), _utc(moment)
+            if peak is None or set_at <= start or rise_at >= end:
                 continue
-            _, rise_az, _ = (sat - obs).at(rise).altaz()
-            _, set_az, _ = (sat - obs).at(moment).altaz()
+            found_pass = True
+            if (not _in_hour_window(rise_at, set_at, start, end, hours)
+                    or not _within_azimuth(topo, rise, moment, azimuth)):
+                continue
+            _, rise_az, _ = topo.at(rise).altaz()
+            _, set_az, _ = topo.at(moment).altaz()
             passes.append({
-                "aos_utc": _utc(rise).isoformat(),
+                "aos_utc": rise_at.isoformat(),
                 "peak_utc": _utc(peak).isoformat(),
-                "los_utc": _utc(moment).isoformat(),
+                "los_utc": set_at.isoformat(),
                 "aos_chile": _local(rise),
                 "peak_chile": _local(peak),
                 "los_chile": _local(moment),
                 "max_el_deg": round(peak_el, 1),
                 "aos_az_deg": round(float(rise_az.degrees), 1),
                 "los_az_deg": round(float(set_az.degrees), 1),
-                "in_progress": _utc(rise) < start,
+                "in_progress": rise_at < start,
             })
             if limit and len(passes) >= limit:
                 break
-    if not passes:
-        current_el = (sat - obs).at(TS.from_datetime(start)).altaz()[0].degrees
-        if current_el >= threshold:
+    if not found_pass:
+        instant = TS.from_datetime(start)
+        current_el = topo.at(instant).altaz()[0].degrees
+        if (current_el >= threshold and _in_hour_window(start, end, start, end, hours)
+                and _within_azimuth(topo, instant, TS.from_datetime(end), azimuth)):
             passes.append({
                 "aos_utc": start.isoformat(), "peak_utc": start.isoformat(), "los_utc": end.isoformat(),
                 "aos_chile": start.astimezone(CHILE).isoformat(timespec="seconds"),
@@ -132,7 +176,6 @@ def az_el_rates(record, observer, when, h=0.5):
 
 def pass_rate_peaks(record, observer, aos, los):
     """Velocidades angulares máximas (°/s de tiempo real de la órbita) durante un pase, muestreadas a 1 s."""
-    import numpy as np
     n = max(3, int((los - aos).total_seconds()) + 1)
     n = min(n, 3600)
     times = TS.from_datetimes([aos + dt.timedelta(seconds=i) for i in range(n)])

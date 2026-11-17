@@ -9,6 +9,4 @@ cartopy>=0.22,<1
 
 websocket-client>=1.7,<2
 pyserial>=3.5,<4
-
-# solo para mock_maia.py
 numpy>=1.26

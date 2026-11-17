@@ -5,11 +5,14 @@ from __future__ import annotations
 import datetime as dt
 import json
 import threading
+import time
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import requests
 from skyfield.api import EarthSatellite, load, wgs84
+
+from orbit import find_passes
 
 
 CHILE = ZoneInfo("America/Santiago")
@@ -59,6 +62,7 @@ class CatalogStore:
         self._reindex()
 
     def _reindex(self):
+        self._azimuth_results = None
         self.by_id = {
             int(r["NORAD_CAT_ID"]): r for r in self.records
             if isinstance(r, dict) and r.get("NORAD_CAT_ID") and r.get("EPOCH")
@@ -123,12 +127,22 @@ class CatalogStore:
             })
         return sorted(result, key=lambda item: item["frequency_mhz"])
 
-    def search(self, query, band, visible_only, observer, page, page_size, hours=None):
-        """`hours` = (inicio, fin) en minutos del día (hora de Chile) o None. Si se da, solo pasan los
-        satélites que superan la elevación mínima dentro de esa franja en las próximas 24 h."""
+    def search(self, query, band, visible_only, observer, page, page_size, hours=None, azimuth=None):
+        """Busca en el catálogo, con filtros opcionales de pase durante las próximas 24 h.
+
+        `hours` se expresa en minutos del día en Chile. `azimuth` es un arco horario en grados.
+        """
         query = str(query or "").strip().casefold()[:80]
+        begin = (page - 1) * page_size
+        cache_key = (query, band, tuple(observer.items()), hours, azimuth) if azimuth and not visible_only else None
         with self.lock:
-            records = list(self.by_id.values())
+            cache = self._azimuth_results
+            if cache_key and cache and cache[0] == cache_key and time.monotonic() < cache[1]:
+                _, _, items, computed_at = cache
+                return {"items": items[begin:begin + page_size], "total": len(items),
+                        "page": page, "page_size": page_size, "computed_at": computed_at}
+            record_index = self.by_id
+            records = list(record_index.values())
             tx_ids = set(self.tx_by_id)
         ranges = None if band == "all" else [BAND_RANGES[b] for b in band if b in BAND_RANGES]   # "s", "l", "sl" o "all"
         if ranges:
@@ -139,9 +153,10 @@ class CatalogStore:
                        or query in str(r["NORAD_CAT_ID"])]
         ts = load.timescale()
         moment = ts.now()
+        now = moment.utc_datetime()
         station = wgs84.latlon(observer["lat"], observer["lon"], elevation_m=observer["alt_m"])
         window = None
-        if hours is not None:
+        if hours is not None and azimuth is None:
             start = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
             moments = [start + dt.timedelta(minutes=WINDOW_STEP_MIN * k) for k in range(1440 // WINDOW_STEP_MIN + 1)]
             keep = []
@@ -157,22 +172,30 @@ class CatalogStore:
         for record in records:
             try:
                 sat = EarthSatellite.from_omm(ts, record)
+                elevation, bearing, _ = (sat - station).at(moment).altaz()
+                el = float(elevation.degrees)
+                if visible_only and el < observer["min_el"]:
+                    continue
                 window_max = None
-                if window is not None:
+                if azimuth is not None:
+                    matches = find_passes(record, observer, start=now, days=1,
+                                          limit=1 if hours is None or visible_only else None,
+                                          azimuth=azimuth, hours=hours)
+                    if not matches or (visible_only and not matches[0]["in_progress"]):
+                        continue
+                    if hours is not None:
+                        window_max = max(p["max_el_deg"] for p in matches)
+                elif window is not None:
                     w_el = (sat - station).at(window).altaz()[0].degrees
                     window_max = float(w_el.max())
                     if window_max < observer["min_el"]:
                         continue
-                elevation, azimuth, _ = (sat - station).at(moment).altaz()
-                el = float(elevation.degrees)
-                if visible_only and el < observer["min_el"]:
-                    continue
                 tx = self.transmitters_for(int(record["NORAD_CAT_ID"]), band_only=ranges is None, ranges=ranges)
                 items.append({
                     "norad_id": int(record["NORAD_CAT_ID"]),
                     "name": record.get("OBJECT_NAME") or f"NORAD {record['NORAD_CAT_ID']}",
                     "elevation_deg": round(el, 1),
-                    "azimuth_deg": round(float(azimuth.degrees), 1),
+                    "azimuth_deg": round(float(bearing.degrees), 1),
                     "visible_now": el >= observer["min_el"],
                     "frequencies_mhz": sorted({x["frequency_mhz"] for x in tx}),
                     "epoch_utc": record.get("EPOCH"),
@@ -182,9 +205,14 @@ class CatalogStore:
                 continue
         items.sort(key=lambda x: (-x["elevation_deg"], x["name"]) if visible_only
                    else (x["name"].casefold(), x["norad_id"]))
-        begin = (page - 1) * page_size
+        computed_at = now.isoformat()
+        if cache_key:
+            with self.lock:
+                if self.by_id is record_index:
+                    # Reutiliza la misma lista al paginar el cálculo orbital.
+                    self._azimuth_results = (cache_key, time.monotonic() + 60, items, computed_at)
         return {"items": items[begin:begin + page_size], "total": len(items),
-                "page": page, "page_size": page_size, "computed_at": moment.utc_datetime().isoformat()}
+                "page": page, "page_size": page_size, "computed_at": computed_at}
 
     def refresh_async(self):
         with self.lock:

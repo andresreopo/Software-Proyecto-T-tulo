@@ -27,7 +27,7 @@ def _move(current, target, limit):
 
 
 class SimulationSession:
-    def __init__(self, record, observer, transmitter, speed=10):
+    def __init__(self, record, observer, transmitter, speed=10, azimuth=None, hours=None):
         self.id = uuid.uuid4().hex
         self.record = record
         self.observer = dict(observer)
@@ -36,8 +36,11 @@ class SimulationSession:
         self.lock = threading.RLock()
         self.created_wall = time.monotonic()
         self.last_wall = self.created_wall
-        self.passes = find_passes(record, observer, days=5, limit=5)
+        self.passes = find_passes(record, observer, days=1 if azimuth else 5, limit=5,
+                                  azimuth=azimuth, hours=hours)
         if not self.passes:
+            if azimuth:
+                raise ValueError("No hay pases compatibles con los filtros en las próximas 24 horas")
             raise ValueError("Este satélite no tiene un pase sobre la elevación mínima en cinco días")
         self.pass_info = self.passes[0]
         now = dt.datetime.now(UTC)
@@ -84,6 +87,15 @@ class SimulationSession:
                 self.stopped = True
             else:
                 raise ValueError("Acción no válida")
+
+    def tracking_status(self):
+        when, _, paused, stopped = self.clock()
+        aos = dt.datetime.fromisoformat(self.pass_info["aos_utc"])
+        los = dt.datetime.fromisoformat(self.pass_info["los_utc"])
+        if stopped or paused or not aos <= when < los:
+            return None
+        norad_id = int(self.record["NORAD_CAT_ID"])
+        return {"norad_id": norad_id, "name": self.record.get("OBJECT_NAME") or f"NORAD {norad_id}"}
 
     def path(self, step_s=4):
         """Trayectoria completa del pase [[az, el], ...] entre AOS y LOS (para dibujar el radar)."""
@@ -192,6 +204,10 @@ class SessionStore:
     def get(self, session_id):
         with self.lock:
             return self.sessions.get(session_id)
+
+    def current(self):
+        with self.lock:
+            return self.sessions[next(reversed(self.sessions))] if self.sessions else None
 
 
 sessions = SessionStore()

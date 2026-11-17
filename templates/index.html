@@ -70,6 +70,15 @@
             </div>
             <small class="hour-note">Hora de Chile · satélites sobre la elevación mínima en esa franja, próximas 24 h</small>
           </div>
+          <div class="hour-filter" id="az-filter">
+            <label class="hour-head"><input id="az-enabled" type="checkbox"> Sector de azimut <span id="az-label" class="hour-label">0° → 360°</span></label>
+            <div class="dual-range">
+              <div class="dual-track"><div class="dual-fill" id="az-fill"></div><div class="dual-fill" id="az-fill-north" hidden></div></div>
+              <input id="az-from" type="range" min="0" max="360" step="1" value="0" aria-label="Azimut inicial" disabled>
+              <input id="az-to" type="range" min="0" max="360" step="1" value="360" aria-label="Azimut final" disabled>
+            </div>
+            <small class="hour-note">Arco permitido en sentido horario · pases completos sobre la elevación mínima</small>
+          </div>
           <div class="quick-label">Accesos rápidos</div>
           <div class="quick-list" id="quick-list">
             <button data-norad="38011">SSOT</button><button data-norad="60133">GOES 19</button>
@@ -96,7 +105,7 @@
             <label class="speed-field">Velocidad<select id="speed"><option value="1">1×</option><option value="5">5×</option><option value="10" selected>10×</option><option value="20">20×</option></select></label>
             <button id="start-session" class="button primary" disabled>▶ Iniciar próximo pase</button>
           </div>
-          <div class="passes-head"><span>Próximos pases sobre el mínimo</span><small>Hora de Chile · próximos 5 días</small></div>
+          <div class="passes-head"><span>Próximos pases sobre el mínimo</span><small id="passes-horizon">Hora de Chile · próximos 5 días</small></div>
           <div id="passes" class="pass-list"><div class="empty-note">Los pases aparecerán al seleccionar un satélite.</div></div>
         </section>
           </div>
@@ -150,6 +159,7 @@
         <section class="card receiver-card">
           <div class="rf-layout">
             <div class="rf-col rf-col-plot">
+              <p id="rf-tracking" class="rf-tracking" role="status">Sin seguimiento activo</p>
               <div class="rf-plot rf-plot-spec">
                 <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro RF recibido desde Maia"></canvas>
                 <div id="rx-empty" class="rf-empty">Esperando datos de Maia…</div>

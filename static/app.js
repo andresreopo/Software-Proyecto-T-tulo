@@ -7,6 +7,7 @@ const longTime = value => value ? new Date(value).toLocaleString("es-CL", {timeZ
 let selected = null, sessionId = null, latest = null, page = 1, pages = 1;
 let querySequence = 0, detailSequence = 0, polling = false, lastPhase = null, lastLock = null;
 let trail = [], passPath = null, pathSession = null, stateAt = 0;
+let requestedNorad = null;
 
 function toast(message) {
   const box = $("toast"); box.textContent = message; box.hidden = false;
@@ -31,7 +32,21 @@ async function api(path, options = {}) {
 function observer() {
   return {lat:Number($("lat").value), lon:Number($("lon").value), alt_m:Number($("alt_m").value), min_el:Number($("min_el").value)};
 }
-function queryForObserver() { return new URLSearchParams(observer()).toString(); }
+function passFilters() {
+  const filters = {};
+  if ($("hour-enabled").checked) {
+    filters.hour_from = Number($("hour-from").value) * 30;
+    filters.hour_to = Number($("hour-to").value) * 30;
+  }
+  if ($("az-enabled").checked) {
+    filters.az_from = Number($("az-from").value);
+    filters.az_to = Number($("az-to").value);
+  }
+  return filters;
+}
+function hasAzimuthFilter() {
+  return $("az-enabled").checked && ($("az-from").value !== "0" || $("az-to").value !== "360");
+}
 
 function showSource(catalog) {
   if (!catalog) return;
@@ -73,7 +88,7 @@ async function loadCatalog(resetPage = false) {
   const sequence = ++querySequence;
   $("catalog-summary").textContent = "Calculando catálogo…";
   const params = new URLSearchParams({...observer(), q:$("search").value.trim(), band:(($("sband-only").checked ? "s" : "") + ($("lband-only").checked ? "l" : "")) || "all", visible:$("visible-only").checked ? "1" : "0", page:String(page), page_size:"40"});
-  if ($("hour-enabled").checked) { params.set("hour_from", String(Number($("hour-from").value) * 30)); params.set("hour_to", String(Number($("hour-to").value) * 30)); }
+  for (const [key, value] of Object.entries(passFilters())) params.set(key, value);
   try {
     const data = await api("/api/catalog?" + params);
     if (sequence !== querySequence) return;
@@ -94,7 +109,15 @@ async function loadCatalog(resetPage = false) {
 
 function renderPasses(passes) {
   const root = $("passes"); root.replaceChildren();
-  if (!passes.length) { const note = document.createElement("div"); note.className = "empty-note"; note.textContent = "No hay pases sobre la elevación mínima en los próximos cinco días."; root.append(note); return; }
+  if (!passes.length) {
+    const note = document.createElement("div");
+    note.className = "empty-note";
+    note.textContent = hasAzimuthFilter()
+      ? "No hay pases compatibles con los filtros en las próximas 24 h."
+      : "No hay pases sobre la elevación mínima en los próximos cinco días.";
+    root.append(note);
+    return;
+  }
   for (const pass of passes.slice(0, 4)) {
     const card = document.createElement("div"); card.className = "pass-item";
     const title = document.createElement("strong"), when = document.createElement("small"), elevation = document.createElement("div");
@@ -143,15 +166,25 @@ function renderSelected(sat) {
   document.querySelectorAll(".sat-item").forEach(button => button.classList.toggle("active", button.textContent.includes(`#${sat.norad_id}`)));
   showSource(sat.catalog);
 }
-async function selectSatellite(norad) {
+async function selectSatellite(norad, refreshPasses = false) {
   const sequence = ++detailSequence;
-  $("selected-name").textContent = "Cargando satélite…";
+  requestedNorad = norad;
+  const keepSelection = refreshPasses && selected?.norad_id === norad;
+  if (!keepSelection) $("selected-name").textContent = "Cargando satélite…";
+  $("start-session").disabled = true;
   try {
-    const data = await api(`/api/catalog/${norad}?${queryForObserver()}`);
+    const params = new URLSearchParams({...observer(), ...passFilters()});
+    const data = await api(`/api/catalog/${norad}?${params}`);
     if (sequence !== detailSequence) return;
+    if (keepSelection) {
+      selected.passes = data.satellite.passes;
+      $("start-session").disabled = !selected.passes.length;
+      renderPasses(selected.passes);
+      return;
+    }
     renderSelected(data.satellite);
     log(`${data.satellite.name} (#${norad}) seleccionado del catálogo.`);
-  } catch (error) { if (sequence === detailSequence) { $("selected-name").textContent = "Selecciona un satélite"; toast(error.message); } }
+  } catch (error) { if (sequence === detailSequence) { if (!keepSelection) $("selected-name").textContent = "Selecciona un satélite"; toast(error.message); } }
 }
 
 async function startSession() {
@@ -159,7 +192,7 @@ async function startSession() {
   const button = $("start-session"); button.disabled = true;
   try {
     const txChoice = $("transmitter").value;
-    const body = {norad_id:selected.norad_id, ...observer(), speed:Number($("speed").value), rotor_follow:!!(window.rotorAutoFollow && window.rotorAutoFollow())};
+    const body = {norad_id:selected.norad_id, ...observer(), ...passFilters(), speed:Number($("speed").value), rotor_follow:!!(window.rotorAutoFollow && window.rotorAutoFollow())};
     if (txChoice === "manual") body.manual_frequency_mhz = Number($("manual-frequency").value);
     else body.transmitter_uuid = txChoice;
     if (sessionId) await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"stop"})}).catch(() => {});
@@ -311,13 +344,48 @@ function updateHourUI() {
   $("hour-fill").style.left = (a.value / 48 * 100) + "%"; $("hour-fill").style.right = (100 - b.value / 48 * 100) + "%";
 }
 let hourTimer;
-for (const id of ["hour-from", "hour-to"]) $(id).addEventListener("input", () => { updateHourUI(); if ($("hour-enabled").checked) { clearTimeout(hourTimer); hourTimer = setTimeout(() => loadCatalog(true), 400); } });
+function refreshPassFilters() {
+  loadCatalog(true);
+  if (requestedNorad !== null) selectSatellite(requestedNorad, true);
+}
+for (const id of ["hour-from", "hour-to"]) $(id).addEventListener("input", () => {
+  updateHourUI();
+  clearTimeout(hourTimer);
+  hourTimer = setTimeout(refreshPassFilters, 400);
+});
 $("hour-enabled").addEventListener("change", () => {
   const on = $("hour-enabled").checked;
   $("hour-from").disabled = $("hour-to").disabled = !on; document.querySelector(".hour-filter").classList.toggle("off", !on);
-  loadCatalog(true);
+  clearTimeout(hourTimer);
+  refreshPassFilters();
 });
 document.querySelector(".hour-filter").classList.add("off"); updateHourUI();
+function updateAzimuthUI() {
+  const start = Number($("az-from").value), end = Number($("az-to").value);
+  const wrapsNorth = start > end;
+  $("az-label").textContent = `${start}° → ${end}°`;
+  $("az-fill").style.left = (start / 3.6) + "%";
+  $("az-fill").style.right = (wrapsNorth ? 0 : 100 - end / 3.6) + "%";
+  $("az-fill-north").hidden = !wrapsNorth;
+  $("az-fill-north").style.left = "0";
+  $("az-fill-north").style.right = (100 - end / 3.6) + "%";
+}
+function applyAzimuthFilter() {
+  $("passes-horizon").textContent = hasAzimuthFilter()
+    ? "Hora de Chile · próximas 24 h" : "Hora de Chile · próximos 5 días";
+  refreshPassFilters();
+}
+for (const id of ["az-from", "az-to"]) {
+  $(id).addEventListener("input", updateAzimuthUI);
+  $(id).addEventListener("change", applyAzimuthFilter);
+}
+$("az-enabled").addEventListener("change", () => {
+  const enabled = $("az-enabled").checked;
+  $("az-from").disabled = $("az-to").disabled = !enabled;
+  $("az-filter").classList.toggle("off", !enabled);
+  applyAzimuthFilter();
+});
+$("az-filter").classList.add("off"); updateAzimuthUI();
 $("apply-observer").addEventListener("click",()=>{loadCatalog(true);if(selected)selectSatellite(selected.norad_id);log("Posición del observador actualizada.");});
 $("prev-page").addEventListener("click",()=>{if(page>1){page--;loadCatalog();}});
 $("next-page").addEventListener("click",()=>{if(page<pages){page++;loadCatalog();}});

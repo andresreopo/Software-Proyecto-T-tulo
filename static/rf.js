@@ -428,12 +428,17 @@ addEventListener("resize", draw);
 // Diagnóstico visible: a qué dirección intenta conectarse el servidor y por qué falla.
 async function refreshLinkNote() {
   try {
-    const s = await (await fetch("/api/rf/status")).json(), pill = q("signal-pill");
+    const response = await fetch("/api/rf/status", {cache: "no-store"});
+    if (!response.ok) throw Error("Estado RF no disponible");
+    const s = await response.json(), pill = q("signal-pill");
+    const label = q("rf-tracking");
+    const trackingText = s.tracking ? "En seguimiento: " + s.tracking.name : "Sin seguimiento activo";
+    if (label.textContent !== trackingText) label.textContent = trackingText;
     pill.title = !s.connected ? `Sin conexión con Maia en ${s.server_url}${s.error ? " — " + s.error : ""}. Verifica la IP de la Pluto (--pluto-ip) y el puerto 8000.`
       : !s.streaming ? `Conectado a ${s.server_url}, pero no llegan frames de espectro${s.error ? " — " + s.error : ""}.` : `Maia en ${s.server_url}`;
-  } catch (_) {}
+  } catch (_) { q("rf-tracking").textContent = "Estado de seguimiento no disponible"; }
 }
-setInterval(refreshLinkNote, 3000);
+setInterval(refreshLinkNote, 1000);
 
 loadConfig(); connect(); draw(); refreshLinkNote();
 })();

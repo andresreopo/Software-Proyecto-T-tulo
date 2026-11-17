@@ -1,5 +1,9 @@
 # Comentarios de versión
 # SATTRACK
+V13:
+- Filtro de pases por sector de azimut de 0° a 360°
+- Nombre del satélite en seguimiento en Monitor RF
+
 V12:
 - Filtro de banda L añadido
 - Incorporación de barrido en frecuencia
@@ -91,7 +95,7 @@ La interfaz se divide en tres pestañas táctiles, pensadas para 800×480 y 1024
 
 1. **Selección** — pasos 01 a 03: estación de observación, lista/búsqueda de satélites y satélite seleccionado (bajada, velocidad, pases e «Iniciar próximo pase»). Al iniciar un pase salta sola a la pestaña 2.
 2. **Seguimiento** — seguimiento orbital / rotor (simulado) con cielo local, mapa, telemetría y el registro de sesión.
-3. **Monitor RF** — espectro/waterfall de Maia y su configuración. El punto junto al nombre indica el estado: verde = recibiendo, rojo = Maia desconectada.
+3. **Monitor RF** — espectro/waterfall de Maia y su configuración. Muestra el nombre del satélite durante el pase y «Sin seguimiento activo» durante la preparación, la pausa y al finalizar. El punto en la pestaña indica si llegan datos de Maia.
 
 La pestaña activa se recuerda al recargar y también se puede abrir con `#select`, `#track` o `#rf`; las flechas ← → del teclado cambian de pestaña.
 
@@ -99,7 +103,7 @@ La pestaña activa se recuerda al recargar y también se puede abrir con `#selec
 
 1. La posición de la estación se toma sola del GPS (modo **Automática**, por defecto; ver «GPS» más abajo). Para fijarla a mano, cambiar el selector a **Manual** y ajustar latitud, longitud y altitud; la elevación mínima siempre es manual. Sin GPS ni fix, los campos conservan los valores iniciales de Santiago (`-33.4489`, `-70.6693`, 570 m, 10°).
 2. Buscar un nombre o NORAD, o utilizar los accesos rápidos. El filtro «Banda S» muestra satélites con una bajada activa entre 2000 y 4000 MHz en SatNOGS DB; «Visibles ahora» usa la elevación calculada para la estación.
-3. Seleccionar el satélite. La aplicación muestra su posición actual, transmisores registrados y próximos pases sobre la elevación mínima durante cinco días.
+3. Seleccionar el satélite para ver su posición, transmisores y pases de los próximos cinco días. Al activar **Sector de azimut**, se muestran los pases de las próximas 24 h que se mantienen dentro del arco permitido mientras están sobre la elevación mínima. Por ejemplo, 270° → 240° pasa por el norte y deja fuera los pases que entran entre 240° y 270°.
 4. Elegir una bajada catalogada o, si se quiere probar una frecuencia no catalogada, la opción manual simulada. Elegir la velocidad de simulación e iniciar el próximo pase.
 5. Observar objetivo orbital, rotor simulado, error de apuntamiento, Doppler calculado, SNR sintética, espectro, waterfall y contador de tramas sintéticas. Se puede pausar, reanudar, cambiar velocidad o detener.
 
