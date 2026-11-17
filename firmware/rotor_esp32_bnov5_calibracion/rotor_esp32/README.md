@@ -39,6 +39,13 @@ Es el de `serial_link.py` de la interfaz unificada, más `CAL` e `IMU`.
 
 ESP32 → interfaz: `POS,<az>,<el>` cada 200 ms (**posición medida**, azimut en norte verdadero = rumbo magnético del sensor + declinación; si el sensor cae se deja de
 enviar y la interfaz la marca obsoleta), `BAT,<V>` cada 1 s, líneas `#` de diagnóstico.
+
+Con `PRINT_BNO_DATA` activo, la ESP32 también emite una muestra nueva del BNO085 hasta 20 veces por segundo. SATTRACK la usa para **Grabar BNO** en la pestaña **Seguimiento**. El formato también lo lee `capturar_bno.py`.
+
+```text
+BNO,esp_ms,muestra,qw,qx,qy,qz,estado_precision,error_estimado_deg,az_sin_offset_deg,el_sin_offset_deg
+```
+
 Motivos de `ERR`: `formato`, `invalid_target`, `queue_full`, `busy`, `no_imu`, `fault`,
 `fault_az`/`fault_el`, `unknown_command`, `line_too_long`, `line_timeout`, `invalid_character`.
 

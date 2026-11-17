@@ -22,6 +22,7 @@ hacia la referencia a velocidad finita.
 
 import collections
 import math
+from pathlib import Path
 import queue
 import threading
 import time
@@ -31,6 +32,7 @@ import serial
 from serial.tools import list_ports as _list_ports
 
 import rotor_config as config
+from capturar_bno import BnoCapture, BNO_PREFIX
 
 SIM_PORT = "sim"
 
@@ -107,6 +109,8 @@ class SimPort:
         self.ff = (0.0, 0.0)
         self.trk_t = 0.0
         self._t = time.monotonic()
+        self._start = self._t
+        self._sample_id = 0
         self._q: queue.Queue = queue.Queue()
         self.is_open = True
         self._bat_t = 0.0
@@ -162,6 +166,16 @@ class SimPort:
             if now - self._bat_t >= 1.0:                   # batería simulada ~12.6 V con una ligera oscilación
                 self._bat_t = now
                 self._q.put(f"BAT,{12.6 + 0.05 * math.sin(now / 5.0):.2f}\n".encode())
+            # Cuaternión sintético para probar la captura con el rotor simulado.
+            self._sample_id = (self._sample_id + 1) & 0xFFFFFFFF
+            esp_ms = int((now - self._start) * 1000) & 0xFFFFFFFF
+            yaw, pitch = math.radians(-self.az) / 2, math.radians(self.el) / 2
+            cw, sw = math.cos(yaw), math.sin(yaw)
+            cp, sp = math.cos(pitch), math.sin(pitch)
+            self._q.put(
+                f"BNO,{esp_ms},{self._sample_id},{cw * cp:.7f},{cw * sp:.7f},"
+                f"{sw * sp:.7f},{sw * cp:.7f},0,nan,{self.az:.5f},{self.el:.5f}\n".encode()
+            )
             return f"POS,{self.az:.2f},{self.el:.2f}\n".encode()
 
     def close(self):
@@ -175,6 +189,7 @@ class SimPort:
 class SerialLink:
     def __init__(self, on_event: Optional[Callable[[dict], None]] = None):
         self._on_event = on_event or (lambda e: None)
+        self.bno = BnoCapture(Path(__file__).resolve().parent / "data" / "bno")
         self._lock  = threading.Lock()      # estado
         self._wlock = threading.Lock()      # escritura al puerto
         self._gen = 0                       # cada connect()/disconnect() invalida el hilo anterior
@@ -240,12 +255,20 @@ class SerialLink:
     def disconnect(self) -> None:
         with self._lock:
             self._gen += 1
+            self._connected = False
+            self.bno.stop("Se desconectó el puerto del rotor.")
             th = self._thread
         if th and th.is_alive():
             th.join(2.0)
         with self._lock:
             self._reset_state()
         self._emit()
+
+    def start_bno_capture(self) -> dict:
+        with self._lock:
+            if not self._connected:
+                raise RuntimeError("Conecta la ESP32 antes de iniciar la captura.")
+            return self.bno.start(simulated=self._port == SIM_PORT)
 
     def send_target(self, az: float, el: float) -> dict:
         az, el = validate_target(az, el)
@@ -334,7 +357,7 @@ class SerialLink:
                 buf = b""
                 while self._alive(gen):
                     raw = ser.readline()
-                    if not raw:
+                    if not raw or not self._alive(gen):
                         continue
                     buf += raw
                     if len(buf) > 2048:
@@ -349,10 +372,11 @@ class SerialLink:
                 if ser is not None:
                     try: ser.close()
                     except Exception: pass
-            if not self._alive(gen):
-                return
             with self._lock:
+                if not self._alive(gen):
+                    return
                 self._connected, self._ser, self._error = False, None, err
+                self.bno.stop(f"Se perdió la conexión serial: {err}")
             self._emit()
             if not ever:                     # el primer intento falló: avisar y no insistir
                 self._first.set()
@@ -369,6 +393,9 @@ class SerialLink:
             pass
 
     def _handle(self, raw: bytes):
+        if raw.startswith(BNO_PREFIX):
+            self.bno.write(raw)
+            return
         self._io("rx", raw.decode("utf-8", "replace").strip())
         parsed = parse_line(raw.decode("utf-8", "replace"))
         if parsed is None:

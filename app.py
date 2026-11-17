@@ -10,7 +10,7 @@ import queue
 import threading
 from datetime import datetime
 
-from flask import Flask, jsonify, render_template, request, Response
+from flask import Flask, jsonify, render_template, request, Response, send_from_directory
 from flask_sock import Sock
 
 import gps_config
@@ -479,6 +479,36 @@ def serial_disconnect():
 @app.get("/api/rotor")
 def rotor_state():
     return jsonify({"ok": True, **rotor.state(), "follow": follower.state()})
+
+
+@app.get("/api/bno/capture")
+def bno_status():
+    return jsonify({"ok": True, **rotor.bno.state()})
+
+
+@app.post("/api/bno/capture/start")
+def bno_start():
+    try:
+        return jsonify({"ok": True, **rotor.start_bno_capture()})
+    except RuntimeError as exc:
+        return error(exc, 409)
+    except OSError as exc:
+        return error(f"No se pudo crear el CSV: {exc}", 500)
+
+
+@app.post("/api/bno/capture/stop")
+def bno_stop():
+    return jsonify({"ok": True, **rotor.bno.stop()})
+
+
+@app.get("/api/bno/captures/<filename>")
+def bno_download(filename):
+    if not filename.startswith("bno_") or not filename.endswith(".csv"):
+        return error("Captura no encontrada.", 404)
+    capture = rotor.bno.state()
+    if capture["active"] and capture["filename"] == filename:
+        return error("Detén la captura antes de descargarla.", 409)
+    return send_from_directory(rotor.bno.directory, filename, as_attachment=True)
 
 
 @app.get("/api/rotor/follow")

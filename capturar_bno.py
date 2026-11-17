@@ -74,6 +74,56 @@ class BnoCsv:
             self._file.close()
 
 
+class BnoCapture:
+    """Captura compartida por los clientes de SATTRACK y el lector serial."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self._lock = threading.Lock()
+        self._csv: BnoCsv | None = None
+        self._state = dict(active=False, filename=None, samples=0, simulated=False, error=None)
+
+    def state(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self, simulated: bool) -> dict:
+        with self._lock:
+            if self._csv is None:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+                prefix = "bno_sim" if simulated else "bno"
+                filename = f"{prefix}_{stamp}.csv"
+                self._csv = BnoCsv(self.directory / filename)
+                self._state.update(active=True, filename=filename, samples=0, simulated=simulated, error=None)
+            return dict(self._state)
+
+    def _finish(self, error: str | None) -> None:
+        try:
+            self._csv.close()
+        except OSError as exc:
+            error = f"No se pudo cerrar el CSV: {exc}"
+        finally:
+            self._csv = None
+            self._state.update(active=False, error=error)
+
+    def stop(self, error: str | None = None) -> dict:
+        with self._lock:
+            if self._csv is not None:
+                self._finish(error)
+            return dict(self._state)
+
+    def write(self, line: bytes) -> None:
+        with self._lock:
+            if self._csv is None:
+                return
+            try:
+                if self._csv.write(line):
+                    self._state["samples"] += 1
+            except OSError as exc:
+                self._finish(f"No se pudo escribir el CSV: {exc}")
+
+
 def capture_serial(port: serial.Serial, destination: BnoCsv) -> None:
     # readline puede devolver parte de una línea si vence el timeout.
     line = bytearray()

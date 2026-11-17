@@ -3,6 +3,7 @@
 V13:
 - Filtro de pases por sector de azimut de 0° a 360°
 - Nombre del satélite en seguimiento en Monitor RF
+- Grabación de cuaterniones de la BNO085 en CSV desde Seguimiento
 
 V12:
 - Filtro de banda L añadido
@@ -185,6 +186,16 @@ La sintonía nunca cambia sola: la frecuencia del satélite es solo metadato orb
 Diagnóstico: `GET /api/rf/status`. Configuración: `GET/PATCH /api/rf/config` (acepta solo las 5 claves de arriba y devuelve lo que Maia aceptó).
 
 **Aún no portado desde MaiaView:** seguimiento a partir de un TLE pegado a mano (aquí se usa el catálogo de CelesTrak) y el mapa manual por Az/El/Alt o Lat/Lon/Alt con presets de observatorio.
+
+## Captura de la BNO085
+
+1. Carga el firmware BNO085 de esta rama en la ESP32 y conéctala desde **Seguimiento**.
+2. Pulsa **Grabar BNO** y espera a que suba el contador de muestras. Puedes grabar mientras haces seguimiento.
+3. Pulsa **Detener captura** y luego **Descargar CSV**. SATTRACK deja una copia en `data/bno/`. Si se pierde el enlace serial, puedes descargar lo que se alcanzó a grabar.
+
+El CSV incluye los cuaterniones `qw`, `qx`, `qy` y `qz`, la hora de recepción en UTC, el contador de la ESP32, la precisión y los ángulos antes de aplicar los offsets. Para probar sin hardware, elige el puerto `sim`. La interfaz indica que son muestras simuladas y el nombre del archivo comienza con `bno_sim_`.
+
+También se puede usar `capturar_bno.py` desde la terminal con la ESP32 desconectada de SATTRACK.
 
 ## Rotor (ESP32 por puerto serial)
 

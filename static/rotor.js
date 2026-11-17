@@ -13,6 +13,7 @@ const getSession = () => (typeof sessionId !== "undefined" ? sessionId : null);
 let rotor = {connected: false, port: null, baud: null, az: null, el: null, tgtAz: null, tgtEl: null,
              error: null, sim: false, elMin: 0, elMax: 90, staleMs: 2000, bat: null, batStaleMs: 5000};
 let follow = {status: "idle"};
+let bno = null, bnoBusy = false, bnoPolling = false;
 let rotorAt = null, batAt = null, lastErr = null, drawPending = false, tickKey = "";
 const isStale = () => rotorAt === null || performance.now() - rotorAt > rotor.staleMs;
 const wrap180 = d => ((d + 540) % 360) - 180;
@@ -71,6 +72,29 @@ function updateUI() {
       + (rotor.az === null ? " Esperando POS de la ESP32…" : stale ? " Sin datos de la ESP32 (posición obsoleta)." : "")
     : (rotor.error ? "Error: " + rotor.error : "Desconectado.");
   renderFollow();
+  renderBno();
+}
+
+function renderBno() {
+  const active = Boolean(bno?.active);
+  const record = q("bno-record"), download = q("bno-download");
+  record.textContent = active ? "Detener captura" : "Grabar BNO";
+  record.disabled = bnoBusy || !bno || (!active && !rotor.connected);
+  download.hidden = active || !bno?.samples;
+  if (!download.hidden) download.href = "/api/bno/captures/" + encodeURIComponent(bno.filename);
+  else download.removeAttribute("href");
+  const count = (bno?.samples ?? 0).toLocaleString("es-CL");
+  const samples = count + (bno?.simulated ? " muestras (sim)" : " muestras");
+  if (active) {
+    q("bno-status").textContent = bno.samples ? "Grabando · " + samples : "Esperando muestras BNO…";
+  } else if (bno?.error) {
+    q("bno-status").textContent = bno.samples ? bno.error + " · " + samples + " guardadas" : bno.error;
+  } else if (bno?.filename) {
+    q("bno-status").textContent = bno.samples ? samples : "Captura sin muestras.";
+  } else {
+    q("bno-status").textContent = !rotor.connected ? "Conecta la ESP32 para grabar."
+      : bno ? "Captura disponible" : "Consultando estado de captura…";
+  }
 }
 
 function renderFollow() {
@@ -182,11 +206,41 @@ addEventListener("resize", schedule);
 
 // ── Acciones ────────────────────────────────────────────────────────────────
 async function call(url, body, method = "POST") {
-  const r = await fetch(url, {method, headers: {"Content-Type": "application/json"}, body: method === "GET" ? undefined : JSON.stringify(body || {})});
+  const r = await fetch(url, {method, cache: "no-store", headers: {"Content-Type": "application/json"}, body: method === "GET" ? undefined : JSON.stringify(body || {})});
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || "Error desconocido");
   return j;
 }
+async function refreshBno() {
+  if (bnoBusy || bnoPolling || q("panel-track").hidden) return;
+  const before = bno;
+  bnoPolling = true;
+  try {
+    const state = await call("/api/bno/capture", null, "GET");
+    if (!bnoBusy && bno === before) bno = state;
+  } catch (_) {
+    if (!bnoBusy && bno === before) bno = null;
+  } finally {
+    bnoPolling = false;
+    schedule();
+  }
+}
+q("bno-record").onclick = async () => {
+  if (bnoBusy || !bno) return;
+  bnoBusy = true;
+  schedule();
+  try {
+    const action = bno.active ? "stop" : "start";
+    bno = await call("/api/bno/capture/" + action);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    bnoBusy = false;
+    schedule();
+  }
+};
+setInterval(refreshBno, 1000);
+
 async function loadPorts() {
   try {
     const j = await call("/api/serial/ports", null, "GET"), sel = q("rot-port"), keep = sel.value || rotor.port;

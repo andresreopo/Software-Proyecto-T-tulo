@@ -139,6 +139,7 @@ struct Pose {
   float accuracyDeg = NAN;      // precisión estimada que informa el sensor
   uint8_t fusionAcc = 0;        // calidad de la fusión: 0=Unreliable .. 3=High
   uint8_t magAcc = 0;           // calibración del magnetómetro: 0=Unreliable .. 3=High
+  uint32_t sampleId = 0;        // contador de reportes de orientación desde el arranque
   uint32_t ms = 0;              // millis() de la última medición
   bool everValid = false;
 };
@@ -261,11 +262,9 @@ void imuEnableReport() {
 }
 
 // Guarda en la pose compartida la precisión que informa el sensor.
-void updateSensorAccuracy() {
-  const uint8_t f = bno08x.getQuatAccuracy();
+void updateMagAccuracy() {
   const uint8_t m = bno08x.getMagAccuracy();
   portENTER_CRITICAL(&poseMux);
-  sharedPose.fusionAcc = f;
   sharedPose.magAcc = m;
   portEXIT_CRITICAL(&poseMux);
 }
@@ -337,7 +336,7 @@ void serviceImuCalibration(uint32_t now) {
 }
 
 // Convierte un quaternion en azimut/elevación de la antena y lo publica.
-void publishPose(double w, double x, double y, double z, float accuracyRad) {
+void publishPose(double w, double x, double y, double z, float accuracyRad, uint8_t fusionAcc) {
   double rawAz, rawEl;
   double b[3];
   portENTER_CRITICAL(&poseMux);
@@ -352,6 +351,8 @@ void publishPose(double w, double x, double y, double z, float accuracyRad) {
   sharedPose.az = RotorMath::normalizeAzimuth(rawAz + azOffset);
   sharedPose.el = rawEl + elOffset;
   sharedPose.accuracyDeg = accuracyRad * static_cast<float>(180.0 / M_PI);
+  sharedPose.fusionAcc = fusionAcc;
+  ++sharedPose.sampleId;
   sharedPose.ms = now;
   sharedPose.everValid = true;
   portEXIT_CRITICAL(&poseMux);
@@ -389,10 +390,11 @@ void imuPoll() {
     // Solo la orientación refresca la pose; el reporte del magnetómetro solo da MagAcc.
     if (id == SENSOR_REPORTID_ROTATION_VECTOR || id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
       publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
-                  cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy());
+                  cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy(),
+                  bno08x.getQuatAccuracy());
     }
   }
-  if (gotData) updateSensorAccuracy();
+  if (gotData) updateMagAccuracy();
   serviceImuCalibration(now);
 }
 
@@ -777,9 +779,11 @@ void uartError(const char *error) {
 
 // Escribe una línea solo si cabe en el buffer de salida: un lector serial lento no
 // debe bloquear la lectura de comandos.
-void sendLine(const char *message, int length) {
+bool sendLine(const char *message, int length) {
   if (length > 0 && controlUart.availableForWrite() >= length)
-    controlUart.write(reinterpret_cast<const uint8_t *>(message), length);
+    return controlUart.write(reinterpret_cast<const uint8_t *>(message), length) ==
+           static_cast<size_t>(length);
+  return false;
 }
 
 // Envía "POS,<az>,<el>\n" con la posición MEDIDA. Sin medición reciente no se envía:
@@ -801,6 +805,22 @@ void reportBattery() {
   char message[24];
   const int length = snprintf(message, sizeof(message), "BAT,%.2f\n", batteryVolts);
   if (length > 0 && length < static_cast<int>(sizeof(message))) sendLine(message, length);
+}
+
+// Emite una muestra nueva con el formato de capturar_bno.py.
+void reportBno() {
+  static uint32_t lastSampleId = 0;
+  const Pose pose = poseSnapshot();
+  if (!poseFresh(pose, millis()) || pose.sampleId == lastSampleId) return;
+
+  char message[128];
+  const int length = snprintf(
+      message, sizeof(message), "BNO,%lu,%lu,%.7f,%.7f,%.7f,%.7f,%u,%.5f,%.5f,%.5f\n",
+      static_cast<unsigned long>(pose.ms), static_cast<unsigned long>(pose.sampleId),
+      pose.q[0], pose.q[1], pose.q[2], pose.q[3], static_cast<unsigned int>(pose.fusionAcc),
+      pose.accuracyDeg, pose.rawAz, pose.rawEl);
+  if (length > 0 && length < static_cast<int>(sizeof(message)) && sendLine(message, length))
+    lastSampleId = pose.sampleId;
 }
 
 // Si el movimiento se declaró en falla, avisa una vez por la interfaz.
@@ -1156,6 +1176,13 @@ void loop() {
   if (now - lastBatteryAt >= cfg::BAT_PERIOD_MS) {
     lastBatteryAt = now;
     reportBattery();
+  }
+  if (cfg::PRINT_BNO_DATA) {
+    static uint32_t lastBnoAt = 0;
+    if (now - lastBnoAt >= cfg::BNO_PRINT_PERIOD_MS) {
+      lastBnoAt = now;
+      reportBno();
+    }
   }
   delay(1);
 }

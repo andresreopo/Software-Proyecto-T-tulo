@@ -206,6 +206,10 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .radar-card .sim-time-row{margin:8px 0 5px}
 .link-controls{display:grid;grid-template-columns:1fr;gap:8px;margin-top:8px}
 .link-card .rotor-hint{margin:8px 0}
+.bno-controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:6px}
+.bno-controls .button{display:inline-flex;align-items:center;height:34px;min-height:34px;padding:2px 6px;text-decoration:none}
+.bno-controls [hidden]{display:none}
+.bno-controls small{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
 .console-head{display:flex;align-items:center;gap:8px;font:700 16px var(--mono);letter-spacing:.06em;color:var(--dim);margin:2px 0 6px}
 .console-head .rf-check{margin:0 0 0 auto;font-weight:400;letter-spacing:0}
 .console-head .button{min-height:26px;padding:2px 9px;font-size:16px}
@@ -225,6 +229,10 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 #panel-track .link-controls{grid-template-columns:minmax(0,1fr) 110px;align-items:end}
 #panel-track .link-controls #rot-conn{grid-column:1 / -1}
 #panel-track .link-card .rotor-hint{margin:6px 0}
+@media(max-height:520px){
+  #panel-track .link-controls{grid-template-columns:minmax(0,1fr) 80px auto}
+  #panel-track .link-controls #rot-conn{grid-column:auto;margin-top:0;padding-inline:8px}
+}
 
 /* Fuentes grandes (mínimo 16 px): ajustes de maquetación para 7" */
 .el-legend{display:none!important}
