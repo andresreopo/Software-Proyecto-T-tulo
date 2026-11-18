@@ -1,5 +1,7 @@
 # Comentarios de versión
 # SATTRACK
+V14:
+- Arreglo de bug de envío de STOP en modo TRK
 V13:
 - Filtro de pases por sector de azimut de 0° a 360°
 - Nombre del satélite en seguimiento en Monitor RF
@@ -44,12 +46,18 @@ V5:
 - Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
 
 # FIRMWARE
+V6: 
+- Arreglo de firmware por largo de cables, disminuye freq i2c
+- Arreglo de bug de inicialización de BNO, watchdog añadido 
 
-V5: Se añade rutina de calibración para BNO
+V5: 
+- Se añade rutina de calibración para BNO
 
-V4: Se corrigen errores asociados al inicio del BNO
+V4: 
+- Se corrigen errores asociados al inicio del BNO
 
-V3: Correcciones a vector de elevación
+V3: 
+- Correcciones a vector de elevación
 
 # SATTRACK (simulación + monitor RF Maia)
 
