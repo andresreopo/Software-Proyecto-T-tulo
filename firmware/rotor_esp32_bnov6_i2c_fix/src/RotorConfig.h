@@ -58,9 +58,15 @@ constexpr bool AZ_SHORTEST_PATH = true;
 // OJO: el I2C por defecto del ESP32 (GPIO 21/22) lo usan STEP/DIR, por eso se usan otros pines.
 constexpr int IMU_SDA_PIN = 25;
 constexpr int IMU_SCL_PIN = 26;
-constexpr uint32_t IMU_I2C_HZ = 400000;
+constexpr uint32_t IMU_I2C_HZ = 50000;
 constexpr uint8_t IMU_ADDRESS = 0x4B;      // 0x4B si el pin SA0/DI está en alto
 constexpr uint32_t IMU_REPORT_US = 10000;  // un dato cada 10 ms (100 Hz)
+// Vigilante: si el sensor contesta por I2C pero no llega ningún reporte de orientación en este
+// tiempo, se reinicia el bus y el sensor (begin() solo prueba que responde, no que transmita).
+constexpr uint32_t IMU_DATA_WATCHDOG_MS = 1500;
+// GPIO conectado al pin RST del BNO085 (reset por hardware en cada reintento). -1 = sin cablear.
+// Recomendado cablearlo (p. ej. GPIO 27, libre): es la forma más fiable de recuperar el sensor.
+constexpr int IMU_RST_PIN = -1;
 // Sin datos del sensor por este tiempo -> los motores frenan y se deja de enviar POS.
 constexpr uint32_t IMU_TIMEOUT_MS = 300;
 

@@ -228,6 +228,8 @@ BNO080 bno08x;  // librería SparkFun (sin pines INT/RST)
 bool imuReady = false;
 uint32_t imuLastTryMs = 0;
 bool wireStarted = false;
+uint32_t imuLastReportMs = 0;  // último reporte de ORIENTACIÓN recibido (solo imuTask)
+uint32_t imuRestartCount = 0;  // reinicios seguidos sin datos (solo imuTask)
 
 // Rutina de calibración del magnetómetro. loop() solo deja una petición; la ejecuta
 // imuTask, que es la única tarea que toca el sensor por I2C.
@@ -357,6 +359,36 @@ void publishPose(double w, double x, double y, double z, float accuracyRad) {
   portEXIT_CRITICAL(&poseMux);
 }
 
+// Libera un bus I2C trabado. Si el ESP32 se reinicia (o el cable falla) a mitad de una
+// transacción, el BNO085 puede quedarse sujetando SDA en bajo y Wire.begin() "funciona"
+// pero ya no llegan datos. Se emulan 9 pulsos de SCL en colector abierto + condición STOP.
+// Llamar con Wire detenido (antes de Wire.begin).
+void i2cBusRecover() {
+  const int sda = cfg::IMU_SDA_PIN, scl = cfg::IMU_SCL_PIN;
+  pinMode(sda, INPUT_PULLUP);
+  pinMode(scl, INPUT_PULLUP);
+  delayMicroseconds(10);
+  for (int i = 0; i < 9; ++i) {
+    pinMode(scl, OUTPUT); digitalWrite(scl, LOW);  delayMicroseconds(10);
+    pinMode(scl, INPUT_PULLUP);                    delayMicroseconds(10);
+    if (digitalRead(sda)) break;                   // el esclavo soltó SDA
+  }
+  // STOP: SDA sube mientras SCL está en alto.
+  pinMode(sda, OUTPUT); digitalWrite(sda, LOW);    delayMicroseconds(10);
+  pinMode(scl, INPUT_PULLUP);                      delayMicroseconds(10);
+  pinMode(sda, INPUT_PULLUP);                      delayMicroseconds(10);
+}
+
+// Reset por hardware del BNO085 (pin RST, activo en bajo). Sin cablear RST (-1) no hace nada.
+void imuHardwareReset() {
+  if (cfg::IMU_RST_PIN < 0) return;
+  pinMode(cfg::IMU_RST_PIN, OUTPUT);
+  digitalWrite(cfg::IMU_RST_PIN, LOW);
+  delay(10);
+  digitalWrite(cfg::IMU_RST_PIN, HIGH);
+  delay(300);  // arranque del BNO085 tras el reset
+}
+
 // Una pasada de lectura del sensor (la llama imuTask cada ~1 ms).
 // Si el sensor no está inicializado, reintenta cada segundo.
 void imuPoll() {
@@ -366,12 +398,15 @@ void imuPoll() {
     imuLastTryMs = now ? now : 1;
     if (wireStarted) Wire.end();  // reintento: liberar el bus antes de volver a iniciarlo
     wireStarted = true;
+    i2cBusRecover();      // libera SDA/SCL si quedaron trabados
+    imuHardwareReset();   // solo si IMU_RST_PIN está cableado
     Wire.begin(cfg::IMU_SDA_PIN, cfg::IMU_SCL_PIN);
     Wire.setClock(cfg::IMU_I2C_HZ);
     if (bno08x.begin(cfg::IMU_ADDRESS, Wire)) {
       imuEnableReport();
       imuReady = true;
-      note("imu ok");
+      imuLastReportMs = millis();  // desde aquí corre el vigilante de datos
+      note("imu responde por I2C; esperando datos de orientacion");
     } else {
       note("imu_init_failed: revisa cableado I2C (SDA/SCL/direccion)");
     }
@@ -390,10 +425,25 @@ void imuPoll() {
     if (id == SENSOR_REPORTID_ROTATION_VECTOR || id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
       publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
                   cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy());
+      imuLastReportMs = millis();
+      imuRestartCount = 0;
     }
   }
   if (gotData) updateSensorAccuracy();
   serviceImuCalibration(now);
+
+  // Vigilante: begin() solo confirma que el sensor contesta por I2C, no que esté enviando
+  // orientación (el comando de activación puede perderse). Sin reportes por
+  // IMU_DATA_WATCHDOG_MS se rehace todo: bus, reset y begin. No se aplica mientras SAVECAL
+  // escribe en la flash del sensor. (Se usa millis() fresco: 'now' es anterior a la lectura.)
+  const uint32_t t = millis();
+  if (!saveStartMs && t - imuLastReportMs > cfg::IMU_DATA_WATCHDOG_MS) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "imu_sin_datos: reiniciando I2C y sensor (intento %lu)",
+             static_cast<unsigned long>(++imuRestartCount));
+    note(msg);
+    imuReady = false;
+  }
 }
 
 // Tarea del sensor (core 0): el I2C bloquea unos cientos de µs por lectura y aquí no
