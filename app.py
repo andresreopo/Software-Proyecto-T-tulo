@@ -460,8 +460,14 @@ def serial_connect():
 def serial_send():
     """Terminal serial: envía una línea manual a la ESP32."""
     body = request.get_json(silent=True) or {}
+    text = str(body.get("text") or "").strip()
+    # STOP/SET/TRK manuales mandan sobre el seguimiento automático: si el hilo siguiera enviando TRK (5 Hz),
+    # pisaría el comando y el rotor no se detendría.
+    if text.split(",")[0].strip().upper() in ("STOP", "SET", "TRK") and follower.active():
+        follower.stop(hold=False)
+        rotor.note("Seguimiento automático detenido por comando manual.")
     try:
-        rotor.send_raw(body.get("text"))
+        rotor.send_raw(text)
     except ValueError as exc:
         return error(exc)
     except RuntimeError as exc:
