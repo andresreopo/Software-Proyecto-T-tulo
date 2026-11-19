@@ -130,9 +130,16 @@ memoria. También informa:
 
 ## Pruebas realizadas
 El control PI se verifica con regresiones de convergencia, saturación, rampa, reinicio y tope mecánico en
-`tests/track_pi_checks.cpp`. Desde esta carpeta, compila las pruebas con
-`g++ -std=c++17 -fsyntax-only -Isrc tests/track_pi_checks.cpp` (también sirve `xtensa-esp32-elf-g++`).
-El firmware se compiló para `esp32dev` con PlatformIO.
+`tests/track_pi_checks.cpp`. Desde esta carpeta, puedes compilar y ejecutar las pruebas en Windows
+con GNU C++.
+
+```powershell
+$testExe = Join-Path $env:TEMP 'rotor-track-pi-checks.exe'
+g++ -std=c++11 -Isrc tests/track_pi_checks.cpp -o $testExe
+if ($LASTEXITCODE -eq 0) { & $testExe }
+```
+
+Para compilar el firmware para `esp32dev`, ejecuta `pio run` desde esta carpeta.
 
 La versión anterior del control se probó en PC con stubs de Arduino/FreeRTOS/BNO08x y simulación con planta
 ideal, ruido de ±0.15° y 20 ms de latencia en el sensor: SET con error final ≈ 0.2° y sin deriva al mantener;

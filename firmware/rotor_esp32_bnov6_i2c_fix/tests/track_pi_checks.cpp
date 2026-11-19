@@ -1,3 +1,5 @@
+#include <cassert>
+
 #include "RotorConfig.h"
 #include "RotorTrackPI.h"
 
@@ -11,7 +13,7 @@ constexpr bool near(double a, double b) { return absValue(a - b) < 1e-9; }
 
 // Modelo determinista: lazo de 1 ms, TRK a 5 Hz y BNO a 100 Hz con 20 ms de atraso.
 // El eje real se mueve un 25 % menos por paso de lo que estima el firmware.
-constexpr double trackingError(double targetRate, double ki, double stepsPerDeg, double maxStepsS) {
+double trackingError(double targetRate, double ki, double stepsPerDeg, double maxStepsS) {
   constexpr double dt = 0.001;
   const double maxRate = maxStepsS / stepsPerDeg;
   const RateRange allowed{-maxRate, maxRate};
@@ -41,7 +43,7 @@ constexpr double trackingError(double targetRate, double ki, double stepsPerDeg,
   return errorSum / 5000;
 }
 
-constexpr bool saturationDoesNotWindUp() {
+bool saturationDoesNotWindUp() {
   Integrator integral;
   constexpr RateRange allowed{-4.5, 4.5};
   for (int i = 0; i < 100; ++i) {
@@ -51,7 +53,7 @@ constexpr bool saturationDoesNotWindUp() {
   return near(integral.update(0, 0, 1.5, allowed, 0, .003), 0);
 }
 
-constexpr bool integralUnwindsAndResets() {
+bool integralUnwindsAndResets() {
   Integrator integral;
   constexpr RateRange allowed{-4.5, 4.5};
   // De 1 °/s de margen en la rampa, solo se acumula hasta 1.5 °/s en total.
@@ -63,7 +65,7 @@ constexpr bool integralUnwindsAndResets() {
   return near(integral.update(0, 0, 1.5, allowed, 0, .003), 0);
 }
 
-constexpr bool mechanicalStopClearsOutwardCorrection() {
+bool mechanicalStopClearsOutwardCorrection() {
   Integrator integral;
   constexpr RateRange allowed{-4.5, 4.5};
   constexpr RateRange upperStop{-4.5, 0};
@@ -73,13 +75,13 @@ constexpr bool mechanicalStopClearsOutwardCorrection() {
   return integral.update(-1, -.5, 1.5, upperStop, 0, .003) < 0;
 }
 
-static_assert(trackingError(2.5, 0, cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED) > .25,
-              "El control P deja un error sostenido en el modelo");
-static_assert(trackingError(2.5, cfg::TRK_KI_AZ, cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED) < .02,
-              "La integral debe reducir el error en azimut");
-static_assert(trackingError(-2.5, cfg::TRK_KI_EL, cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED) < .02,
-              "La integral debe reducir el error en elevacion al girar en sentido contrario");
-static_assert(saturationDoesNotWindUp(), "La saturacion de velocidad o rampa no acumula integral");
-static_assert(integralUnwindsAndResets(), "La integral respeta su cota, descarga e inicia en cero");
-static_assert(mechanicalStopClearsOutwardCorrection(), "En el tope se borra la integral saliente");
 }  // namespace
+
+int main() {
+  assert(trackingError(2.5, 0, cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED) > .25);
+  assert(trackingError(2.5, cfg::TRK_KI_AZ, cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED) < .02);
+  assert(trackingError(-2.5, cfg::TRK_KI_EL, cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED) < .02);
+  assert(saturationDoesNotWindUp());
+  assert(integralUnwindsAndResets());
+  assert(mechanicalStopClearsOutwardCorrection());
+}

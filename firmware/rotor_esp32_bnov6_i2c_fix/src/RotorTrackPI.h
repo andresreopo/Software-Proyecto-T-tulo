@@ -13,11 +13,11 @@ struct RateRange {
 
 class Integrator {
  public:
-  constexpr void reset() { correction = 0; }
+  void reset() { correction = 0; }
 
   // Todas las velocidades, incluida la corrección integral, están en °/s.
-  constexpr double update(double baseRate, double increment, double maxCorrection,
-                          RateRange allowed, double currentRate, double rampDelta) {
+  double update(double baseRate, double increment, double maxCorrection,
+                 RateRange allowed, double currentRate, double rampDelta) {
     // Al tocar un límite físico se descarta la corrección que empuja hacia el tope.
     correction = allowed.clamp(correction);
     const double requested = baseRate + correction;
