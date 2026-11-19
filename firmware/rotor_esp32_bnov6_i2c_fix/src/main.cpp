@@ -57,9 +57,9 @@
 //  Todo el movimiento es por velocidad. Cada 1 ms, por eje:
 //    SET : v = KP*error, limitada por la rampa de frenado sqrt(2*a*error) para llegar
 //          sin pasarse; dentro de GOTO_DEADBAND_DEG se detiene y vigila.
-//    TRK : v = vsat + KP*error, con la referencia extrapolada con la velocidad entre
-//          mensajes (feedforward + proporcional). Si no llegan TRK por TRK_TIMEOUT_MS
-//          frena y queda en reposo.
+//    TRK : v = vsat + KP*error + integral. La referencia se extrapola entre mensajes;
+//          la integral corrige el error sostenido y respeta los límites y la rampa.
+//          Si no llegan TRK por TRK_TIMEOUT_MS frena y queda en reposo.
 //  La velocidad cambia con una rampa (RAMP_ACCELERATION) y se convierte en pulsos STEP.
 //
 //  SEGURIDAD
@@ -93,6 +93,7 @@
 
 #include "RotorConfig.h"
 #include "RotorMath.h"
+#include "RotorTrackPI.h"
 
 namespace cfg = RotorConfig;
 
@@ -111,12 +112,13 @@ struct AxisConfig {
   bool invertDir;
   double stepsPerDeg;
   float maxSpeed;  // pasos/s
+  double trackKi;
 };
 constexpr AxisConfig AXES[2] = {
     {cfg::AZ_STEP_PIN, cfg::AZ_DIR_PIN, cfg::AZ_INVERT_DIRECTION,
-     cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED},
+     cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED, cfg::TRK_KI_AZ},
     {cfg::EL_STEP_PIN, cfg::EL_DIR_PIN, cfg::EL_INVERT_DIRECTION,
-     cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED},
+     cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED, cfg::TRK_KI_EL},
 };
 
 // ── Comunicación entre tareas ────────────────────────────────────────────────
@@ -217,6 +219,7 @@ Pose poseSnapshot() {
 bool poseFresh(const Pose &pose, uint32_t nowMs) {
   return pose.everValid && nowMs - pose.ms <= cfg::IMU_TIMEOUT_MS;
 }
+bool poseFresh(const Pose &pose) { return poseFresh(pose, millis()); }
 
 // Mensaje de diagnóstico (empieza con '#', la interfaz lo ignora o lo registra).
 void note(const char *text) { controlUart.print("# "); controlUart.println(text); }
@@ -507,6 +510,7 @@ struct Controller {
   float cmd[2] = {0, 0};          // velocidad ordenada (pasos/s, con signo)
   double acc[2] = {0, 0};         // fracción de paso acumulada (ver emitSteps)
   long emitted[2] = {0, 0};       // pasos enviados en total (con signo)
+  RotorTrack::Integrator trackIntegral[2];
   // Ventana del detector de fallas
   uint32_t winMs[2] = {0, 0};
   long winSteps[2] = {0, 0};
@@ -518,6 +522,14 @@ struct Controller {
   int faultAxis = 0;
   double lastMeasEl = 0;  // última elevación medida (para el informe de falla)
   uint8_t strikes[2] = {0, 0};  // ventanas malas consecutivas por eje
+
+  void setMode(Mode next) {
+    if (mode == Mode::Track && next != Mode::Track) {
+      trackIntegral[AZ].reset();
+      trackIntegral[EL].reset();
+    }
+    mode = next;
+  }
 };
 
 // Acerca `current` a `desired` cambiando a lo sumo `maxDelta` (rampa de velocidad).
@@ -551,10 +563,9 @@ void emitSteps(Controller &c, int axis, double dt) {
   c.emitted[axis] += dir;
 }
 
-// Velocidad deseada (°/s, con signo) de un eje según el modo y el error de posición.
-double desiredRate(const Controller &c, int axis, double err) {
+// Velocidad deseada (°/s, con signo) para SET.
+double gotoRate(int axis, double err) {
   const double maxDeg = AXES[axis].maxSpeed / AXES[axis].stepsPerDeg;
-  if (c.mode == Mode::Track) return c.ff[axis] + cfg::CTRL_KP * err;
   // Goto: dentro de la banda muerta quieto; fuera, proporcional pero limitado por la
   // rampa de frenado v <= sqrt(2*a*distancia) para no pasarse del objetivo.
   const double absErr = err < 0 ? -err : err;
@@ -563,6 +574,15 @@ double desiredRate(const Controller &c, int axis, double err) {
   const double brake = sqrt(2.0 * aDeg * (absErr - cfg::GOTO_DEADBAND_DEG));
   const double lim = brake < maxDeg ? brake : maxDeg;
   return clampAbs(cfg::CTRL_KP * err, lim);
+}
+
+double trackRate(Controller &c, int axis, double err, double ff, double dt,
+                 RotorTrack::RateRange allowed) {
+  const AxisConfig &a = AXES[axis];
+  const double currentRate = c.cmd[axis] / a.stepsPerDeg;
+  const double rampDelta = cfg::RAMP_ACCELERATION * dt / a.stepsPerDeg;
+  return c.trackIntegral[axis].update(ff + cfg::CTRL_KP * err, a.trackKi * err * dt,
+                                     cfg::TRK_MAX_INTEGRAL_DEG_S, allowed, currentRate, rampDelta);
 }
 
 // Detector de fallas de un eje (ver cabecera). Devuelve true si detecta una falla.
@@ -661,21 +681,24 @@ void calStep(Controller &c, const Pose &pose, uint32_t nowMs, double desired[2])
 }
 
 // Un paso del lazo de control (cada ~1 ms).
-void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
+void controlStep(Controller &c, uint32_t nowUs) {
   double dt = (nowUs - c.lastUs) / 1e6;
   c.lastUs = nowUs;
   if (dt <= 0) return;
   if (dt > 0.05) dt = 0.05;  // tras una pausa larga no dar un salto de velocidad
 
   const Pose pose = poseSnapshot();
+  // La otra tarea puede publicar una muestra entre dos lecturas de reloj.
+  // Tomar la hora después de copiar la muestra evita una edad negativa sin signo.
+  const uint32_t nowMs = millis();
   const bool fresh = poseFresh(pose, nowMs);
   const double meas[2] = {pose.az, pose.el};
 
   if (c.mode == Mode::Track && nowMs - c.trkMs > cfg::TRK_TIMEOUT_MS)
-    c.mode = Mode::Idle;  // dejaron de llegar TRK: frenar y quedarse
+    c.setMode(Mode::Idle);  // dejaron de llegar TRK: frenar y quedarse
   // Sin medición reciente se frena y se olvida el objetivo: cuando el sensor vuelva
   // el rotor no debe retomar solo un movimiento viejo; espera una orden nueva.
-  if (!fresh) c.mode = Mode::Idle;
+  if (!fresh) c.setMode(Mode::Idle);
 
   if (c.cal.active && !fresh) abortCal(c, "el sensor dejo de responder");
 
@@ -683,27 +706,34 @@ void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
   if (c.cal.active) {
     calStep(c, pose, nowMs, desired);   // CALAX: movimiento en lazo abierto
   } else if (fresh && c.fault == FaultNone && c.mode != Mode::Idle) {
-    const double age = c.mode == Mode::Track ? (nowMs - c.trkMs) / 1000.0 : 0.0;
+    const bool tracking = c.mode == Mode::Track;
+    const double age = tracking ? (nowMs - c.trkMs) / 1000.0 : 0.0;
     for (int i = 0; i < 2; ++i) {
-      double ref = c.tgt[i] + c.ff[i] * age;  // objetivo extrapolado (Track)
+      const AxisConfig &a = AXES[i];
+      const double maxRate = a.maxSpeed / a.stepsPerDeg;
+      double ff = c.ff[i];
+      const double ref = c.tgt[i] + ff * age;  // objetivo extrapolado (Track)
+      RotorTrack::RateRange allowed{-maxRate, maxRate};
       double err;
       if (i == AZ) {
         err = cfg::AZ_SHORTEST_PATH ? RotorMath::wrap180(ref - meas[AZ])
                                     : RotorMath::normalizeAzimuth(ref) - meas[AZ];
+        if (!cfg::AZ_SHORTEST_PATH) {
+          if (meas[AZ] <= 0) allowed.min = 0;
+          if (meas[AZ] >= 360) allowed.max = 0;
+        }
       } else {
-        ref = ref < cfg::EL_MIN_DEG ? cfg::EL_MIN_DEG
-                                    : (ref > cfg::EL_MAX_DEG ? cfg::EL_MAX_DEG : ref);
-        err = ref - meas[EL];
+        const double limitedRef = ref < cfg::EL_MIN_DEG ? cfg::EL_MIN_DEG
+                                  : ref > cfg::EL_MAX_DEG ? cfg::EL_MAX_DEG : ref;
+        err = limitedRef - meas[EL];
+        if ((ref <= cfg::EL_MIN_DEG && ff < 0) || (ref >= cfg::EL_MAX_DEG && ff > 0)) ff = 0;
+        if (meas[EL] <= cfg::EL_MIN_DEG) allowed.min = 0;
+        if (meas[EL] >= cfg::EL_MAX_DEG) allowed.max = 0;
       }
-      desired[i] = clampAbs(desiredRate(c, i, err) * AXES[i].stepsPerDeg, AXES[i].maxSpeed);
+      const double rate = tracking ? trackRate(c, i, err, ff, dt, allowed)
+                                   : allowed.clamp(gotoRate(i, err));
+      desired[i] = rate * a.stepsPerDeg;
     }
-    // No empujar contra los límites mecánicos (según la posición medida).
-    if (!cfg::AZ_SHORTEST_PATH &&
-        ((meas[AZ] <= 0 && desired[AZ] < 0) || (meas[AZ] >= 360 && desired[AZ] > 0)))
-      desired[AZ] = 0;
-    if ((meas[EL] <= cfg::EL_MIN_DEG && desired[EL] < 0) ||
-        (meas[EL] >= cfg::EL_MAX_DEG && desired[EL] > 0))
-      desired[EL] = 0;
   }
 
   const float maxDelta = static_cast<float>(cfg::RAMP_ACCELERATION * dt);
@@ -723,7 +753,7 @@ void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
     else if (checkAxisFault(c, EL, meas[EL], fresh, nowMs)) c.fault = FaultEl;
     if (c.fault != FaultNone) {  // frenado inmediato; STOP la borra
       c.faultAxis = c.fault == FaultAz ? AZ : EL;
-      c.mode = Mode::Idle;
+      c.setMode(Mode::Idle);
       c.cmd[AZ] = c.cmd[EL] = 0;
     }
   }
@@ -749,27 +779,27 @@ void motionTask(void *) {
           break;
         case CommandType::Target:
           if (ctl.cal.active) break;  // ocupado calibrando (loop ya lo rechaza)
-          ctl.mode = Mode::Goto;
+          ctl.setMode(Mode::Goto);
           ctl.tgt[AZ] = cmd.az;  ctl.tgt[EL] = cmd.el;
           ctl.ff[AZ] = ctl.ff[EL] = 0;
           break;
         case CommandType::Track:
           if (ctl.cal.active) break;
-          ctl.mode = Mode::Track;
+          ctl.setMode(Mode::Track);
           ctl.tgt[AZ] = cmd.az;  ctl.tgt[EL] = cmd.el;
           ctl.ff[AZ] = cmd.vaz;  ctl.ff[EL] = cmd.vel;
           ctl.trkMs = cmd.timeMs;
           break;
         case CommandType::Stop:
           if (ctl.cal.active) abortCal(ctl, "interrumpida por STOP");
-          ctl.mode = Mode::Idle;  // frena con la rampa
+          ctl.setMode(Mode::Idle);  // frena con la rampa
           ctl.fault = FaultNone;  // STOP borra la falla
           ctl.winValid[AZ] = ctl.winValid[EL] = false; ctl.strikes[AZ] = ctl.strikes[EL] = 0;
           break;
       }
     }
 
-    controlStep(ctl, millis(), micros());
+    controlStep(ctl, micros());
     state.moving = ctl.cmd[AZ] != 0 || ctl.cmd[EL] != 0;
     state.calibrating = ctl.cal.active;
     state.fault = ctl.fault;
@@ -963,7 +993,7 @@ void processCalibration() {
 bool motionAllowed() {
   if (motionSnapshot().calibrating || magCalActive) { uartError("busy"); return false; }
   if (motionSnapshot().fault != FaultNone) { uartError("fault"); return false; }
-  if (!poseFresh(poseSnapshot(), millis())) { uartError("no_imu"); return false; }
+  if (!poseFresh(poseSnapshot())) { uartError("no_imu"); return false; }
   return true;
 }
 
@@ -1020,7 +1050,7 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "CALAX") == 0) {
     const MotionState st = motionSnapshot();
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else if (queueCommand(CommandType::CalAxes, 0, 0)) {
       controlUart.println("ACK");
@@ -1053,7 +1083,7 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "MAGCAL") == 0) {
     const MotionState st = motionSnapshot();
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else {
       magCalActive = true;  // desde ya no se aceptan SET/TRK/CALAX
@@ -1061,7 +1091,7 @@ void handleCommand(char *line) {
       controlUart.println("ACK");
     }
   } else if (strcmp(text, "SAVECAL") == 0) {
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (motionSnapshot().moving) uartError("busy");
     else { requestImu(ImuReqSaveCal); controlUart.println("ACK"); }
   } else if (strcmp(text, "ENDCAL") == 0) {

@@ -135,8 +135,11 @@ constexpr uint32_t CAL_SETTLE_MS = 1500;        // espera tras cada tramo para q
 
 // ───────────────────────── Lazo de control ─────────────────────────
 // SET : va a la posición y la mantiene (corrigiendo si el sensor ve que se desvió).
-// TRK : velocidad = vsat + CTRL_KP * error (feedforward + P) sobre la posición medida.
+// TRK : velocidad = vsat + CTRL_KP * error + corrección integral.
 constexpr double CTRL_KP = 2.0;            // 1/s, ganancia sobre el error de posición
+constexpr double TRK_KI_AZ = 0.8;          // 1/s², 0 desactiva la integral de azimut
+constexpr double TRK_KI_EL = 0.8;          // 1/s², 0 desactiva la integral de elevación
+constexpr double TRK_MAX_INTEGRAL_DEG_S = 1.5;  // °/s, corrección máxima por eje
 constexpr double GOTO_DEADBAND_DEG = 0.5;  // error aceptado en SET; no bajar de la
                                            // precisión del sensor (≈1-2° con magnetómetro)
 constexpr uint32_t TRK_TIMEOUT_MS = 1500;  // sin TRK por este tiempo -> frenar y mantener
@@ -206,6 +209,8 @@ static_assert(CAL_SWEEP_DEG > 1 && CAL_SPEED_STEPS > 0 && CAL_SPEED_STEPS <= AZ_
                   CAL_SPEED_STEPS <= EL_MAX_SPEED, "Parámetros de CALAX inválidos");
 static_assert(BAT_SAMPLES > 0 && BAT_R2_OHM > 0, "Parámetros de batería inválidos");
 static_assert(CTRL_KP > 0 && GOTO_DEADBAND_DEG >= 0, "Parámetros de control inválidos");
+static_assert(TRK_KI_AZ >= 0 && TRK_KI_EL >= 0 && TRK_MAX_INTEGRAL_DEG_S >= 0,
+              "Parámetros de la integral de seguimiento inválidos");
 static_assert(FAULT_WINDOW_MS > 0 && FAULT_MIN_DEG > 0 && FAULT_MIN_RATIO > 0 &&
                   FAULT_MIN_RATIO < 1, "Parámetros del detector de fallas inválidos");
 }  // namespace RotorConfig

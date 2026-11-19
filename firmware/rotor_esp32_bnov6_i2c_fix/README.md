@@ -45,10 +45,16 @@ Motivos de `ERR`: `formato`, `invalid_target`, `queue_full`, `busy`, `no_imu`, `
 ## Control
 - **SET:** velocidad proporcional al error, limitada por la rampa de frenado `sqrt(2·a·error)` para no
   pasarse; dentro de `GOTO_DEADBAND_DEG` se detiene y vigila (corrige si el sensor ve una desviación).
-- **TRK:** `velocidad = vsat + CTRL_KP·error` sobre la posición medida, con la referencia extrapolada entre
-  mensajes. Sin `TRK` por 1.5 s el rotor frena y queda en reposo (sigue hasta ~1.5 s a la velocidad del
-  satélite antes de frenar).
+- **TRK:** `velocidad = vsat + CTRL_KP·error + corrección integral` sobre la posición medida, con la referencia
+  extrapolada entre mensajes. Cada eje conserva su integral entre mensajes, para compensar el error sostenido.
+  La corrección tiene una cota y se acumula solo en la medida en que lo permiten la velocidad, la rampa y los
+  topes. Se reinicia al salir de seguimiento por `STOP`, `SET`, falta de mensajes por 1.5 s, pérdida de la
+  IMU o una falla.
 - Flujo de la interfaz: `SET` al AOS → `TRK` a 5 Hz → `SET` al LOS.
+
+En `src/RotorConfig.h`, `TRK_KI_AZ` y `TRK_KI_EL` parten en 0.8 s⁻². Un valor de 0 desactiva la integral del
+eje para comparar con el control proporcional. `TRK_MAX_INTEGRAL_DEG_S` limita su aporte a ±1.5 °/s por eje.
+Las ganancias iniciales se verificaron en simulación y se pueden ajustar con mediciones del rotor.
 
 ## Seguridad
 - **Sensor caído** (sin datos por `IMU_TIMEOUT_MS`): frena, olvida el objetivo, rechaza `SET/TRK` con
@@ -123,7 +129,12 @@ memoria. También informa:
   la posición; solo fijan las velocidades y el detector de fallas.
 
 ## Pruebas realizadas
-Compilado en PC con stubs de Arduino/FreeRTOS/BNO08x (no con el core real del ESP32) y simulación con planta
+El control PI se verifica con regresiones de convergencia, saturación, rampa, reinicio y tope mecánico en
+`tests/track_pi_checks.cpp`. Desde esta carpeta, compila las pruebas con
+`g++ -std=c++17 -fsyntax-only -Isrc tests/track_pi_checks.cpp` (también sirve `xtensa-esp32-elf-g++`).
+El firmware se compiló para `esp32dev` con PlatformIO.
+
+La versión anterior del control se probó en PC con stubs de Arduino/FreeRTOS/BNO08x y simulación con planta
 ideal, ruido de ±0.15° y 20 ms de latencia en el sensor: SET con error final ≈ 0.2° y sin deriva al mantener;
 seguimiento a 3 °/s con error máx. 0.15° (az) y 0.05° (el); `CAL` con offset de 37°; detección de sentido
 invertido; sensor caído y recuperación. Falta validar con hardware real.
