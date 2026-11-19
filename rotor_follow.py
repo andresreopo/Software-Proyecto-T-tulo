@@ -18,7 +18,7 @@ import rotor_config as cfg
 from orbit import az_el_rates, pass_rate_peaks
 
 
-MAX_LEAD_SECONDS = 10
+MAX_LEAD_SECONDS = 300                                  # 5 minutos
 
 
 class RotorFollower:

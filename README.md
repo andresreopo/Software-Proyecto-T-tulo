@@ -2,6 +2,7 @@
 # SATTRACK
 V14:
 - Arreglo de bug de envío de STOP en modo TRK
+
 V13:
 - Filtro de pases por sector de azimut de 0° a 360°
 - Nombre del satélite en seguimiento en Monitor RF
