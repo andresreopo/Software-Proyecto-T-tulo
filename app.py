@@ -22,7 +22,7 @@ from map_plot import render_map_base_png, render_map_overlay_png, observer_fract
 from maia_rf import maia_rf
 import rotor_config
 from serial_link import SerialLink, list_ports, SIM_PORT
-from rotor_follow import RotorFollower
+from rotor_follow import MAX_LEAD_SECONDS, RotorFollower
 
 
 app = Flask(__name__)
@@ -106,7 +106,8 @@ def error(message, code=400):
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", rotor_lead_seconds=follower.state()["lead_seconds"],
+                           rotor_lead_max=MAX_LEAD_SECONDS)
 
 
 @app.get("/api/status")
@@ -490,6 +491,17 @@ def rotor_state():
 @app.get("/api/rotor/follow")
 def rotor_follow_state():
     return jsonify({"ok": True, **follower.state()})
+
+
+@app.patch("/api/rotor/follow")
+def update_rotor_follow():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or "lead_seconds" not in body:
+        return error("Indica el adelanto en segundos.")
+    try:
+        return jsonify({"ok": True, **follower.set_lead_seconds(body["lead_seconds"])})
+    except ValueError as exc:
+        return error(exc)
 
 
 @app.post("/api/session/<session_id>/rotor-follow")

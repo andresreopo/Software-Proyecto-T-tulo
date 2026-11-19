@@ -225,6 +225,12 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 #panel-track .link-controls{grid-template-columns:minmax(0,1fr) 110px;align-items:end}
 #panel-track .link-controls #rot-conn{grid-column:1 / -1}
 #panel-track .link-card .rotor-hint{margin:6px 0}
+.rot-lead-header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px}
+.rot-lead-header .rotor-field{margin:0}
+.rot-lead-header output{font:700 16px var(--mono);color:var(--cyan);white-space:nowrap}
+.rot-lead-controls{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:8px;color:var(--muted);white-space:nowrap}
+.rot-lead-controls input{width:100%;min-width:0;height:37px;margin:0;accent-color:var(--cyan)}
+#rot-lead-status:empty{display:none}
 
 /* Fuentes grandes (mínimo 16 px): ajustes de maquetación para 7" */
 .el-legend{display:none!important}

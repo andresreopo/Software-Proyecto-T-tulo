@@ -141,6 +141,20 @@
               <button type="button" class="button primary full" id="rot-conn">Conectar</button>
             </div>
             <p class="rotor-hint" id="rot-status">Desconectado.</p>
+            <form id="rot-lead-form" autocomplete="off">
+              <div class="rot-lead-header">
+                <label class="rotor-field" for="rot-lead">Adelanto del tracker (s)</label>
+                <output id="rot-lead-value" for="rot-lead" aria-live="off">{{ rotor_lead_seconds|string|replace('.', ',') }} s</output>
+              </div>
+              <div class="rot-lead-controls">
+                <span aria-hidden="true">0 s</span>
+                <input id="rot-lead" name="lead_seconds" type="range" min="0"
+                       max="{{ rotor_lead_max }}" step="0.1" value="{{ rotor_lead_seconds }}">
+                <span aria-hidden="true">{{ rotor_lead_max }} s</span>
+                <button type="submit" class="button secondary" id="rot-lead-apply">Aplicar</button>
+              </div>
+              <p id="rot-lead-status" role="status" class="rotor-hint"></p>
+            </form>
             <div class="console-head"><span>CONSOLA</span>
               <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK/BAT</label>
               <button type="button" class="button ghost" id="con-pause">Pausar</button>

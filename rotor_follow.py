@@ -15,7 +15,10 @@ import threading
 import time
 
 import rotor_config as cfg
-from orbit import UTC, az_el_rates, pass_rate_peaks
+from orbit import az_el_rates, pass_rate_peaks
+
+
+MAX_LEAD_SECONDS = 10
 
 
 class RotorFollower:
@@ -25,7 +28,7 @@ class RotorFollower:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
-        self._state = {"status": "idle"}
+        self._state = {"status": "idle", "lead_seconds": 0.0}
 
     def state(self):
         with self._lock:
@@ -47,6 +50,13 @@ class RotorFollower:
             print("[RotorFollower] error en callback:", exc)
 
     # ── control ──────────────────────────────────────────────────────────────
+    def set_lead_seconds(self, value):
+        """Ajusta el adelanto sin reiniciar la sesión ni el hilo del rotor."""
+        if type(value) not in (int, float) or not 0 <= value <= MAX_LEAD_SECONDS:
+            raise ValueError(f"El adelanto debe ser un número entre 0 y {MAX_LEAD_SECONDS} segundos.")
+        self._set(lead_seconds=float(value))
+        return self.state()
+
     def start(self, session):
         """Arranca el seguimiento del pase de `session`. Lanza RuntimeError si el rotor no está conectado."""
         if not self._link.state()["connected"]:
@@ -73,7 +83,9 @@ class RotorFollower:
         stop = threading.Event()
         self._stop = stop
         with self._lock:
+            lead_seconds = self._state["lead_seconds"]
             self._state = {"status": "waiting", "session_id": session.id, "speed": speed, "error": None,
+                           "lead_seconds": lead_seconds,
                            "warnings": warnings, "az": None, "el": None, "vaz": None, "vel": None,
                            "t_to_aos": None, "t_to_los": None,
                            "max_az_rate": None if max_az is None else round(max_az, 2),
@@ -139,14 +151,23 @@ class RotorFollower:
                               t_to_los=(los - sim_now).total_seconds() / speed)
                 else:
                     hold_sent = None
-                    az, el, vaz, vel = az_el_rates(session.record, session.observer, sim_now)
-                    vaz, vel = vaz * speed, vel * speed                  # °/s de tiempo real
+                    with self._lock:
+                        lead_seconds = self._state["lead_seconds"]
+                    seconds_to_los = (los - sim_now).total_seconds()
+                    # Los segundos de adelanto pertenecen al reloj orbital de la sesión.
+                    # Al alcanzar LOS se sostiene su posición mientras termina el pase.
+                    target_time = sim_now + dt.timedelta(seconds=min(lead_seconds, seconds_to_los))
+                    az, el, vaz, vel = az_el_rates(session.record, session.observer, target_time)
+                    if target_time == los:
+                        vaz = vel = 0.0
+                    else:
+                        vaz, vel = vaz * speed, vel * speed              # °/s de tiempo real
                     el_cmd = min(max(el, cfg.ROTOR_EL_MIN), cfg.ROTOR_EL_MAX)
                     if el_cmd != el:                                     # el rotor no puede ir más allá del límite
                         vel = 0.0
                     self._link.send_track(az, el_cmd, vaz, vel)
                     self._set(status="tracking", speed=speed, error=None, az=az, el=el_cmd, vaz=vaz, vel=vel,
-                              t_to_aos=0.0, t_to_los=(los - sim_now).total_seconds() / speed)
+                              t_to_aos=0.0, t_to_los=seconds_to_los / speed)
             except (RuntimeError, ValueError) as exc:                    # p. ej. el puerto se cayó: sigue intentando
                 if str(exc) != last_err:
                     last_err = str(exc)
