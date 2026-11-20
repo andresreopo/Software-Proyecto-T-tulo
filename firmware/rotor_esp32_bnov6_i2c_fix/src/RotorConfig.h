@@ -14,6 +14,8 @@ constexpr uint8_t AZ_DIR_PIN  = 23;
 constexpr uint8_t AZ_STEP_PIN = 22;
 constexpr uint8_t EL_DIR_PIN  = 21;
 constexpr uint8_t EL_STEP_PIN = 19;
+constexpr uint8_t AZ_LIMIT_PIN = 32;          // INPUT_PULLUP, LOW = final de carrera activo
+constexpr uint32_t AZ_LIMIT_RELEASE_MS = 30;  // HIGH estable antes de rearmar con STOP
 // Sentido de giro. Con lazo cerrado un sentido invertido NO es solo "gira al revés":
 // el control empujaría en la dirección equivocada. El detector de fallas (más abajo)
 // lo detecta y detiene los motores con ERR,fault_az / ERR,fault_el; si pasa en la

@@ -64,6 +64,8 @@
 //
 //  SEGURIDAD
 //  ----------------------------------------------------------------------------
+//  * El final de carrera de azimut (GPIO 32 a LOW) corta los pulsos de ambos ejes
+//    y cancela el movimiento. Se rearma con STOP después de liberar el contacto.
 //  * Sin datos del sensor por IMU_TIMEOUT_MS: los motores frenan y no se acepta SET/TRK.
 //  * Detector de fallas: cada FAULT_WINDOW_MS se compara el movimiento esperado según
 //    los pasos enviados con el medido. Si no coincide (sentido invertido, motor sin
@@ -91,6 +93,7 @@
 
 #include <cstring>
 
+#include "RotorAzLimit.h"
 #include "RotorConfig.h"
 #include "RotorMath.h"
 #include "RotorTrackPI.h"
@@ -145,7 +148,10 @@ struct Pose {
   bool everValid = false;
 };
 
-enum Fault : uint8_t { FaultNone = 0, FaultAz = 1, FaultEl = 2 };
+enum Fault : uint8_t { FaultNone = 0, FaultAz = 1, FaultEl = 2, FaultAzLimit = 3 };
+constexpr const char *AZ_LIMIT_ERROR = "fault_az_limit";
+
+bool azLimitPressed() { return digitalRead(cfg::AZ_LIMIT_PIN) == LOW; }
 
 // Estado que motionTask() publica para loop().
 struct MotionState {
@@ -499,6 +505,7 @@ struct CalRun {
 
 struct Controller {
   CalRun cal;
+  RotorAzLimit azLimit;
   Mode mode = Mode::Idle;
   double tgt[2] = {0, 0};   // objetivo (°)
   double ff[2] = {0, 0};    // velocidad del objetivo (°/s), solo en Track
@@ -546,21 +553,24 @@ double clampAbs(double x, double limit) {
 // Se acumula la fracción de paso (speed*dt) y se emite un pulso cada vez que se
 // completa uno: la velocidad media resulta exacta aunque el lazo corra a 1 ms
 // (con un intervalo entero de ms, 400 pasos/s saldrían a 333).
-void emitSteps(Controller &c, int axis, double dt) {
+// Devuelve false si se detecta el final de carrera justo antes de un pulso.
+bool emitSteps(Controller &c, int axis, double dt) {
   c.acc[axis] += c.cmd[axis] * dt;
   if (c.acc[axis] > 2.0) c.acc[axis] = 2.0;
   if (c.acc[axis] < -2.0) c.acc[axis] = -2.0;
   int dir = 0;
   if (c.acc[axis] >= 1.0) { dir = 1; c.acc[axis] -= 1.0; }
   else if (c.acc[axis] <= -1.0) { dir = -1; c.acc[axis] += 1.0; }
-  if (dir == 0) return;
+  if (dir == 0) return true;
   const AxisConfig &a = AXES[axis];
   digitalWrite(a.dirPin, ((dir > 0) != a.invertDir) ? HIGH : LOW);
   delayMicroseconds(2);  // tiempo de establecimiento de DIR antes del pulso
+  if (azLimitPressed()) return false;
   digitalWrite(a.stepPin, HIGH);
   delayMicroseconds(cfg::STEP_PULSE_US);
   digitalWrite(a.stepPin, LOW);
   c.emitted[axis] += dir;
+  return true;
 }
 
 // Velocidad deseada (°/s, con signo) para SET.
@@ -621,6 +631,17 @@ void abortCal(Controller &c, const char *reason) {
   c.cal.data.aborted = true;
   c.cal.data.reason = reason;
   publishCal(c.cal.data);
+}
+
+void sampleAzLimit(Controller &c, bool pressed) {
+  const bool wasTripped = c.azLimit.tripped();
+  c.azLimit.sample(pressed, millis());
+  if (!pressed || wasTripped) return;
+
+  if (c.cal.active) abortCal(c, "final de carrera de azimut activo");
+  c.setMode(Mode::Idle);
+  c.cmd[AZ] = c.cmd[EL] = 0;
+  c.acc[AZ] = c.acc[EL] = 0;
 }
 
 // CALAX, un paso: mueve el eje del tramo actual en lazo abierto, espera a que el sensor se
@@ -684,7 +705,7 @@ void calStep(Controller &c, const Pose &pose, uint32_t nowMs, double desired[2])
 void controlStep(Controller &c, uint32_t nowUs) {
   double dt = (nowUs - c.lastUs) / 1e6;
   c.lastUs = nowUs;
-  if (dt <= 0) return;
+  if (dt <= 0 || c.azLimit.tripped()) return;
   if (dt > 0.05) dt = 0.05;  // tras una pausa larga no dar un salto de velocidad
 
   const Pose pose = poseSnapshot();
@@ -739,7 +760,10 @@ void controlStep(Controller &c, uint32_t nowUs) {
   const float maxDelta = static_cast<float>(cfg::RAMP_ACCELERATION * dt);
   for (int i = 0; i < 2; ++i) {
     c.cmd[i] = ramp(c.cmd[i], static_cast<float>(desired[i]), maxDelta);
-    emitSteps(c, i, dt);
+    if (!emitSteps(c, i, dt)) {
+      sampleAzLimit(c, true);
+      return;
+    }
   }
 
   // Detector de fallas. El azimut no se evalúa cerca del cenit (indefinido). Durante CALAX se
@@ -767,8 +791,10 @@ void motionTask(void *) {
   ctl.lastUs = micros();
 
   for (;;) {
+    sampleAzLimit(ctl, azLimitPressed());
     MotionCommand cmd;
-    if (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE) {
+    if (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE &&
+        (!ctl.azLimit.tripped() || cmd.type == CommandType::Stop)) {
       state.activeCommandId = cmd.id;
       switch (cmd.type) {
         case CommandType::CalAxes:
@@ -795,6 +821,14 @@ void motionTask(void *) {
           ctl.setMode(Mode::Idle);  // frena con la rampa
           ctl.fault = FaultNone;  // STOP borra la falla
           ctl.winValid[AZ] = ctl.winValid[EL] = false; ctl.strikes[AZ] = ctl.strikes[EL] = 0;
+          if (ctl.azLimit.tripped()) {
+            const bool pressed = azLimitPressed();
+            const uint32_t nowMs = millis();
+            ctl.azLimit.sample(pressed, nowMs);
+            if (ctl.azLimit.rearm(nowMs, cfg::AZ_LIMIT_RELEASE_MS)) {
+              xQueueReset(commandQueue);  // tras rearmar hace falta una orden nueva
+            }
+          }
           break;
       }
     }
@@ -802,7 +836,7 @@ void motionTask(void *) {
     controlStep(ctl, micros());
     state.moving = ctl.cmd[AZ] != 0 || ctl.cmd[EL] != 0;
     state.calibrating = ctl.cal.active;
-    state.fault = ctl.fault;
+    state.fault = ctl.azLimit.tripped() ? FaultAzLimit : ctl.fault;
     if (ctl.fault != FaultNone) {
       state.faultExpectedDeg = static_cast<float>(ctl.evalExpected[ctl.faultAxis]);
       state.faultMeasuredDeg = static_cast<float>(ctl.evalActual[ctl.faultAxis]);
@@ -886,9 +920,14 @@ void reportBattery() {
 // Si el movimiento se declaró en falla, avisa una vez por la interfaz.
 void reportFaults() {
   static Fault reported = FaultNone;
-  const Fault now = motionSnapshot().fault;
-  if (now != reported && now != FaultNone) {
-    const MotionState st = motionSnapshot();
+  const MotionState st = motionSnapshot();
+  const Fault now = st.fault;
+  if (now == reported) return;
+  reported = now;
+  if (now == FaultAzLimit) {
+    uartError(AZ_LIMIT_ERROR);
+    note("final de carrera de azimut activo; libera el contacto y envia STOP");
+  } else if (now != FaultNone) {
     const bool az = now == FaultAz;
     uartError(az ? "fault_az" : "fault_el");
     // Motivo: comparar lo esperado (pasos enviados) con lo medido por el sensor.
@@ -907,7 +946,6 @@ void reportFaults() {
     note(msg);
     note("motores detenidos; corrige y envia STOP");
   }
-  reported = now;
 }
 
 // Procesa el resultado de una CALAX: calcula, informa y guarda el eje de la antena corregido.
@@ -991,8 +1029,10 @@ void processCalibration() {
 
 // Comprueba que se pueden aceptar SET/TRK; si no, responde el error y devuelve false.
 bool motionAllowed() {
-  if (motionSnapshot().calibrating || magCalActive) { uartError("busy"); return false; }
-  if (motionSnapshot().fault != FaultNone) { uartError("fault"); return false; }
+  const MotionState st = motionSnapshot();
+  if (st.fault == FaultAzLimit || azLimitPressed()) { uartError(AZ_LIMIT_ERROR); return false; }
+  if (st.calibrating || magCalActive) { uartError("busy"); return false; }
+  if (st.fault != FaultNone) { uartError("fault"); return false; }
   if (!poseFresh(poseSnapshot())) { uartError("no_imu"); return false; }
   return true;
 }
@@ -1050,7 +1090,8 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "CALAX") == 0) {
     const MotionState st = motionSnapshot();
-    if (!poseFresh(poseSnapshot())) uartError("no_imu");
+    if (st.fault == FaultAzLimit || azLimitPressed()) uartError(AZ_LIMIT_ERROR);
+    else if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else if (queueCommand(CommandType::CalAxes, 0, 0)) {
       controlUart.println("ACK");
@@ -1186,6 +1227,7 @@ void setup() {
     pinMode(a.dirPin, OUTPUT);
     digitalWrite(a.stepPin, LOW);
   }
+  pinMode(cfg::AZ_LIMIT_PIN, INPUT_PULLUP);
   analogReadResolution(12);
   analogSetPinAttenuation(cfg::BAT_PIN, ADC_11db);  // rango del pin ~0-3.3 V
 
