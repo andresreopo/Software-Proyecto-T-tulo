@@ -15,7 +15,10 @@ constexpr uint8_t AZ_STEP_PIN = 22;
 constexpr uint8_t EL_DIR_PIN  = 21;
 constexpr uint8_t EL_STEP_PIN = 19;
 constexpr uint8_t AZ_LIMIT_PIN = 32;          // INPUT_PULLUP, LOW = final de carrera activo
-constexpr uint32_t AZ_LIMIT_RELEASE_MS = 30;  // HIGH estable antes de rearmar con STOP
+constexpr uint32_t AZ_LIMIT_RELEASE_MS = 30;  // HIGH estable antes del STOP automático
+constexpr uint32_t AZ_LIMIT_APPROACH_MS = 250;  // antigüedad máxima del último paso al detectar LOW
+constexpr double AZ_LIMIT_BACKOFF_MAX_DEG = 3.0;
+constexpr float AZ_LIMIT_BACKOFF_SPEED = 100.0f;  // micropasos/s
 // Sentido de giro. Con lazo cerrado un sentido invertido NO es solo "gira al revés":
 // el control empujaría en la dirección equivocada. El detector de fallas (más abajo)
 // lo detecta y detiene los motores con ERR,fault_az / ERR,fault_el; si pasa en la
@@ -38,6 +41,10 @@ constexpr double AZ_STEPS_PER_DEG =
     AZ_FULL_STEPS_PER_REV * AZ_MICROSTEPS * AZ_GEAR_RATIO / 360.0;
 constexpr double EL_STEPS_PER_DEG =
     EL_FULL_STEPS_PER_REV * EL_MICROSTEPS * EL_GEAR_RATIO / 360.0;
+constexpr unsigned AZ_LIMIT_BACKOFF_MAX_STEPS =
+    static_cast<unsigned>(AZ_LIMIT_BACKOFF_MAX_DEG * AZ_STEPS_PER_DEG);
+static_assert(AZ_LIMIT_BACKOFF_MAX_STEPS > 0 && AZ_LIMIT_BACKOFF_SPEED > 0,
+              "El retroceso debe permitir al menos un paso");
 
 // ───────────────────────── Dinámica ─────────────────────────
 // Velocidad máxima (micropasos/s). Con 88.9 pasos/° son 400 pasos/s ≈ 4.5 °/s.

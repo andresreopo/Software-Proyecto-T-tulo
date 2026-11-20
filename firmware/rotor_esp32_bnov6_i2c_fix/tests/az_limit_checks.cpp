@@ -6,32 +6,60 @@
 int main() {
   constexpr uint32_t delayMs = RotorConfig::AZ_LIMIT_RELEASE_MS;
   RotorAzLimit limit;
+  const auto sample = [&](bool pressed, uint32_t nowMs, int approachDir) {
+    limit.sample(pressed, nowMs, approachDir, delayMs);
+  };
   assert(!limit.tripped());
-  assert(!limit.rearm(0, delayMs));
 
-  // Interruptor ya presionado al arrancar.
-  limit.sample(true, 0);
+  // Sin un último paso conocido, el contacto presionado impide mover.
+  sample(true, 0, 0);
   assert(limit.tripped());
-  assert(!limit.rearm(100, delayMs));
-
-  // Un rebote al soltar vuelve a iniciar el plazo.
-  limit.sample(false, 110);
-  assert(!limit.rearm(110, delayMs));
-  limit.sample(true, 111);
-  assert(!limit.rearm(111 + delayMs, delayMs));
-  constexpr uint32_t releasedAt = 200;
-  limit.sample(false, releasedAt);
-  limit.sample(false, releasedAt + delayMs - 1);
-  assert(!limit.rearm(releasedAt + delayMs - 1, delayMs));
-  limit.sample(false, releasedAt + delayMs);
-  assert(limit.tripped());  // Soltar no basta sin STOP.
-  assert(limit.rearm(releasedAt + delayMs, delayMs));
+  assert(limit.backoffDirection() == 0);
+  sample(false, 100, 0);
+  sample(false, 100 + delayMs, 0);
   assert(!limit.tripped());
 
-  // El plazo de liberación también funciona al desbordarse millis().
-  limit.sample(true, UINT32_MAX - 2);
-  limit.sample(false, UINT32_MAX - 1);
-  assert(!limit.rearm(delayMs - 3, delayMs));
-  assert(limit.rearm(delayMs - 2, delayMs));
+  // Al soltar se detienen los pasos. Un rebote continúa en el mismo sentido
+  // con el mismo presupuesto de pasos, aunque cambie el sentido de la referencia.
+  sample(true, 200, 1);
+  assert(limit.backoffDirection() == -1);
+  limit.recordBackoffStep(2);
+  sample(false, 210, 0);
+  assert(limit.backoffDirection() == 0);
+  sample(true, 211, -1);
+  assert(limit.backoffDirection() == -1);
+  limit.recordBackoffStep(2);
+  assert(limit.tripped());
+  assert(!limit.canBackOff());
+  assert(limit.backoffDirection() == 0);
+  sample(false, 220, 0);
+  sample(false, 220 + delayMs - 1, 0);
+  assert(limit.tripped());
+  sample(false, 220 + delayMs, 0);
   assert(!limit.tripped());
+  assert(limit.trips() == 2);
+
+  // Aproximación en sentido negativo. Un STOP cancela el retroceso incluso tras un rebote.
+  sample(true, UINT32_MAX - 3, -1);
+  assert(limit.backoffDirection() == 1);
+  limit.cancelBackoff();
+  sample(true, UINT32_MAX - 2, -1);
+  assert(limit.backoffDirection() == 0);
+  sample(false, UINT32_MAX - 1, 0);
+  sample(false, delayMs - 3, 0);
+  assert(limit.tripped());
+  sample(false, delayMs - 2, 0);
+  assert(!limit.tripped());
+
+  // Se descarta la secuencia TRK anterior hasta que haya una pausa completa.
+  constexpr uint32_t quietMs = RotorConfig::TRK_TIMEOUT_MS;
+  RotorTrackAfterLimit track;
+  assert(track.accept(0, 0, false, quietMs));
+  assert(!track.accept(200, 1, true, quietMs));
+  assert(!track.accept(400, 1, false, quietMs));
+  assert(!track.accept(400 + quietMs - 1, 1, false, quietMs));
+  assert(track.accept(400 + 2 * quietMs - 1, 1, false, quietMs));
+  assert(!track.accept(500 + 2 * quietMs, 2, false, quietMs));  // aviso no observado durante el toque
+  RotorTrackAfterLimit firstTrack;
+  assert(firstTrack.accept(200, 1, false, quietMs));  // sin una secuencia anterior
 }

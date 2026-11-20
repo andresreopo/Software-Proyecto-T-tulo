@@ -48,7 +48,15 @@ def _rotor_broadcast(event):
                 pass
 
 
-rotor = SerialLink(on_event=_rotor_broadcast)
+def _rotor_serial_event(event):
+    _rotor_broadcast(event)
+    if (event.get("type") == "rotor_io" and event.get("dir") == "rx"
+            and event.get("text") in ("ERR,fault_az_limit", "ERR,track_wait")
+            and follower.active()):
+        follower.stop(hold=False)
+
+
+rotor = SerialLink(on_event=_rotor_serial_event)
 follower = RotorFollower(rotor, on_event=_rotor_broadcast)
 
 

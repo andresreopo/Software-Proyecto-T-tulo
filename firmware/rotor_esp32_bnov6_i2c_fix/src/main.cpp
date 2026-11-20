@@ -64,8 +64,8 @@
 //
 //  SEGURIDAD
 //  ----------------------------------------------------------------------------
-//  * El final de carrera de azimut (GPIO 32 a LOW) corta los pulsos de ambos ejes
-//    y cancela el movimiento. Se rearma con STOP después de liberar el contacto.
+//  * El final de carrera de azimut (GPIO 32 a LOW) cancela el movimiento. Azimut
+//    puede retroceder en sentido contrario al último paso para liberar el contacto.
 //  * Sin datos del sensor por IMU_TIMEOUT_MS: los motores frenan y no se acepta SET/TRK.
 //  * Detector de fallas: cada FAULT_WINDOW_MS se compara el movimiento esperado según
 //    los pasos enviados con el medido. Si no coincide (sentido invertido, motor sin
@@ -148,10 +148,11 @@ struct Pose {
   bool everValid = false;
 };
 
-enum Fault : uint8_t { FaultNone = 0, FaultAz = 1, FaultEl = 2, FaultAzLimit = 3 };
+enum Fault : uint8_t { FaultNone, FaultAz, FaultEl, FaultAzLimit, FaultAzLimitBlocked };
 constexpr const char *AZ_LIMIT_ERROR = "fault_az_limit";
 
 bool azLimitPressed() { return digitalRead(cfg::AZ_LIMIT_PIN) == LOW; }
+bool isAzLimitFault(Fault fault) { return fault == FaultAzLimit || fault == FaultAzLimitBlocked; }
 
 // Estado que motionTask() publica para loop().
 struct MotionState {
@@ -159,6 +160,7 @@ struct MotionState {
   bool calibrating = false;      // CALAX en curso
   uint32_t activeCommandId = 0;  // última orden ya procesada por motionTask
   Fault fault = FaultNone;
+  uint32_t azLimitTrips = 0;
   // Detalle de la última evaluación de falla (válido si fault != FaultNone).
   float faultExpectedDeg = 0;  // movimiento esperado según pasos enviados (con signo)
   float faultMeasuredDeg = 0;  // movimiento medido por el sensor en esa ventana
@@ -517,6 +519,8 @@ struct Controller {
   float cmd[2] = {0, 0};          // velocidad ordenada (pasos/s, con signo)
   double acc[2] = {0, 0};         // fracción de paso acumulada (ver emitSteps)
   long emitted[2] = {0, 0};       // pasos enviados en total (con signo)
+  int lastAzDir = 0;              // sentido del último pulso de azimut en movimiento normal
+  uint32_t lastAzStepMs = 0;
   RotorTrack::Integrator trackIntegral[2];
   // Ventana del detector de fallas
   uint32_t winMs[2] = {0, 0};
@@ -553,24 +557,30 @@ double clampAbs(double x, double limit) {
 // Se acumula la fracción de paso (speed*dt) y se emite un pulso cada vez que se
 // completa uno: la velocidad media resulta exacta aunque el lazo corra a 1 ms
 // (con un intervalo entero de ms, 400 pasos/s saldrían a 333).
-// Devuelve false si se detecta el final de carrera justo antes de un pulso.
-bool emitSteps(Controller &c, int axis, double dt) {
+enum class StepResult { NotDue, Emitted, SwitchChanged };
+
+StepResult emitSteps(Controller &c, int axis, double dt, bool backingOff = false) {
   c.acc[axis] += c.cmd[axis] * dt;
   if (c.acc[axis] > 2.0) c.acc[axis] = 2.0;
   if (c.acc[axis] < -2.0) c.acc[axis] = -2.0;
   int dir = 0;
   if (c.acc[axis] >= 1.0) { dir = 1; c.acc[axis] -= 1.0; }
   else if (c.acc[axis] <= -1.0) { dir = -1; c.acc[axis] += 1.0; }
-  if (dir == 0) return true;
+  if (dir == 0) return StepResult::NotDue;
   const AxisConfig &a = AXES[axis];
   digitalWrite(a.dirPin, ((dir > 0) != a.invertDir) ? HIGH : LOW);
   delayMicroseconds(2);  // tiempo de establecimiento de DIR antes del pulso
-  if (azLimitPressed()) return false;
+  // Solo el retroceso de azimut puede emitir pasos mientras el contacto está en LOW.
+  if (azLimitPressed() != backingOff) return StepResult::SwitchChanged;
   digitalWrite(a.stepPin, HIGH);
   delayMicroseconds(cfg::STEP_PULSE_US);
   digitalWrite(a.stepPin, LOW);
   c.emitted[axis] += dir;
-  return true;
+  if (axis == AZ && !backingOff) {
+    c.lastAzDir = dir;
+    c.lastAzStepMs = millis();
+  }
+  return StepResult::Emitted;
 }
 
 // Velocidad deseada (°/s, con signo) para SET.
@@ -634,14 +644,44 @@ void abortCal(Controller &c, const char *reason) {
 }
 
 void sampleAzLimit(Controller &c, bool pressed) {
+  const uint32_t nowMs = millis();
   const bool wasTripped = c.azLimit.tripped();
-  c.azLimit.sample(pressed, millis());
-  if (!pressed || wasTripped) return;
+  const bool recentStep = nowMs - c.lastAzStepMs <= cfg::AZ_LIMIT_APPROACH_MS;
+  const bool motionActive = c.mode != Mode::Idle || c.cal.active;
+  const int approachDir = motionActive && recentStep && c.fault == FaultNone ? c.lastAzDir : 0;
+  c.azLimit.sample(pressed, nowMs, approachDir, cfg::AZ_LIMIT_RELEASE_MS);
+  if (wasTripped == c.azLimit.tripped()) return;
 
   if (c.cal.active) abortCal(c, "final de carrera de azimut activo");
   c.setMode(Mode::Idle);
   c.cmd[AZ] = c.cmd[EL] = 0;
   c.acc[AZ] = c.acc[EL] = 0;
+  c.lastAzDir = 0;
+  c.winValid[AZ] = c.winValid[EL] = false;
+  c.strikes[AZ] = c.strikes[EL] = 0;
+  xQueueReset(commandQueue);
+}
+
+void backOffAzLimit(Controller &c, double dt) {
+  const int dir = c.azLimit.backoffDirection();
+  if (dir != 0) {
+    const float speed = fminf(cfg::AZ_LIMIT_BACKOFF_SPEED, AXES[AZ].maxSpeed);
+    c.cmd[AZ] = ramp(c.cmd[AZ], dir * speed, static_cast<float>(cfg::RAMP_ACCELERATION * dt));
+    switch (emitSteps(c, AZ, dt, true)) {
+      case StepResult::Emitted:
+        c.azLimit.recordBackoffStep(cfg::AZ_LIMIT_BACKOFF_MAX_STEPS);
+        break;
+      case StepResult::SwitchChanged:
+        sampleAzLimit(c, false);
+        break;
+      case StepResult::NotDue:
+        break;
+    }
+  }
+  if (c.azLimit.backoffDirection() == 0) {
+    c.cmd[AZ] = 0;
+    c.acc[AZ] = 0;
+  }
 }
 
 // CALAX, un paso: mueve el eje del tramo actual en lazo abierto, espera a que el sensor se
@@ -705,8 +745,12 @@ void calStep(Controller &c, const Pose &pose, uint32_t nowMs, double desired[2])
 void controlStep(Controller &c, uint32_t nowUs) {
   double dt = (nowUs - c.lastUs) / 1e6;
   c.lastUs = nowUs;
-  if (dt <= 0 || c.azLimit.tripped()) return;
+  if (dt <= 0) return;
   if (dt > 0.05) dt = 0.05;  // tras una pausa larga no dar un salto de velocidad
+  if (c.azLimit.tripped()) {
+    backOffAzLimit(c, dt);
+    return;
+  }
 
   const Pose pose = poseSnapshot();
   // La otra tarea puede publicar una muestra entre dos lecturas de reloj.
@@ -760,7 +804,7 @@ void controlStep(Controller &c, uint32_t nowUs) {
   const float maxDelta = static_cast<float>(cfg::RAMP_ACCELERATION * dt);
   for (int i = 0; i < 2; ++i) {
     c.cmd[i] = ramp(c.cmd[i], static_cast<float>(desired[i]), maxDelta);
-    if (!emitSteps(c, i, dt)) {
+    if (emitSteps(c, i, dt) == StepResult::SwitchChanged) {
       sampleAzLimit(c, true);
       return;
     }
@@ -821,14 +865,7 @@ void motionTask(void *) {
           ctl.setMode(Mode::Idle);  // frena con la rampa
           ctl.fault = FaultNone;  // STOP borra la falla
           ctl.winValid[AZ] = ctl.winValid[EL] = false; ctl.strikes[AZ] = ctl.strikes[EL] = 0;
-          if (ctl.azLimit.tripped()) {
-            const bool pressed = azLimitPressed();
-            const uint32_t nowMs = millis();
-            ctl.azLimit.sample(pressed, nowMs);
-            if (ctl.azLimit.rearm(nowMs, cfg::AZ_LIMIT_RELEASE_MS)) {
-              xQueueReset(commandQueue);  // tras rearmar hace falta una orden nueva
-            }
-          }
+          ctl.azLimit.cancelBackoff();
           break;
       }
     }
@@ -836,7 +873,10 @@ void motionTask(void *) {
     controlStep(ctl, micros());
     state.moving = ctl.cmd[AZ] != 0 || ctl.cmd[EL] != 0;
     state.calibrating = ctl.cal.active;
-    state.fault = ctl.azLimit.tripped() ? FaultAzLimit : ctl.fault;
+    state.azLimitTrips = ctl.azLimit.trips();
+    state.fault = ctl.fault;
+    if (ctl.azLimit.tripped())
+      state.fault = ctl.azLimit.canBackOff() ? FaultAzLimit : FaultAzLimitBlocked;
     if (ctl.fault != FaultNone) {
       state.faultExpectedDeg = static_cast<float>(ctl.evalExpected[ctl.faultAxis]);
       state.faultMeasuredDeg = static_cast<float>(ctl.evalActual[ctl.faultAxis]);
@@ -923,10 +963,13 @@ void reportFaults() {
   const MotionState st = motionSnapshot();
   const Fault now = st.fault;
   if (now == reported) return;
+  if (isAzLimitFault(reported) && !isAzLimitFault(now))
+    note("final de carrera de azimut liberado; STOP automatico");
   reported = now;
-  if (now == FaultAzLimit) {
+  if (isAzLimitFault(now)) {
     uartError(AZ_LIMIT_ERROR);
-    note("final de carrera de azimut activo; libera el contacto y envia STOP");
+    note(now == FaultAzLimit ? "final de carrera de azimut activo; retroceso automatico"
+                             : "final de carrera de azimut bloqueado; rotor detenido");
   } else if (now != FaultNone) {
     const bool az = now == FaultAz;
     uartError(az ? "fault_az" : "fault_el");
@@ -1030,7 +1073,7 @@ void processCalibration() {
 // Comprueba que se pueden aceptar SET/TRK; si no, responde el error y devuelve false.
 bool motionAllowed() {
   const MotionState st = motionSnapshot();
-  if (st.fault == FaultAzLimit || azLimitPressed()) { uartError(AZ_LIMIT_ERROR); return false; }
+  if (isAzLimitFault(st.fault) || azLimitPressed()) { uartError(AZ_LIMIT_ERROR); return false; }
   if (st.calibrating || magCalActive) { uartError("busy"); return false; }
   if (st.fault != FaultNone) { uartError("fault"); return false; }
   if (!poseFresh(poseSnapshot())) { uartError("no_imu"); return false; }
@@ -1067,8 +1110,14 @@ void handleCommand(char *line) {
     } else if (!RotorMath::validTarget(v[0], v[1], cfg::EL_MIN_DEG, cfg::EL_MAX_DEG) ||
                fabs(v[2]) > 360.0 || fabs(v[3]) > 360.0) {
       uartError("invalid_target");
-    } else if (motionAllowed()) {
-      queueCommand(CommandType::Track, RotorMath::normalizeAzimuth(v[0]), v[1], v[2], v[3]);
+    } else {
+      static RotorTrackAfterLimit trackStream;
+      const MotionState st = motionSnapshot();
+      const bool limitActive = isAzLimitFault(st.fault) || azLimitPressed();
+      if (!trackStream.accept(millis(), st.azLimitTrips, limitActive, cfg::TRK_TIMEOUT_MS))
+        uartError(limitActive ? AZ_LIMIT_ERROR : "track_wait");
+      else if (motionAllowed())
+        queueCommand(CommandType::Track, RotorMath::normalizeAzimuth(v[0]), v[1], v[2], v[3]);
     }
   } else if (strcmp(text, "STOP") == 0) {
     if (queueCommand(CommandType::Stop, 0, 0)) controlUart.println("ACK");
@@ -1090,7 +1139,7 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "CALAX") == 0) {
     const MotionState st = motionSnapshot();
-    if (st.fault == FaultAzLimit || azLimitPressed()) uartError(AZ_LIMIT_ERROR);
+    if (isAzLimitFault(st.fault) || azLimitPressed()) uartError(AZ_LIMIT_ERROR);
     else if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else if (queueCommand(CommandType::CalAxes, 0, 0)) {
