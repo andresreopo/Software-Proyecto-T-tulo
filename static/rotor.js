@@ -14,8 +14,10 @@ let rotor = {connected: false, port: null, baud: null, az: null, el: null, tgtAz
              error: null, sim: false, elMin: 0, elMax: 90, staleMs: 2000, bat: null, batStaleMs: 5000};
 let follow = {status: "idle"};
 let rotorAt = null, batAt = null, lastErr = null, drawPending = false, tickKey = "";
-const leadInput = q("rot-lead"), leadStatus = q("rot-lead-status"), leadApply = q("rot-lead-apply");
-const leadValue = q("rot-lead-value");
+const leadControls = Array.from(document.querySelectorAll(".rot-lead-form"), form => ({
+  form, input: form.elements.lead_seconds, value: form.querySelector("output"),
+  status: form.querySelector(".rot-lead-status"), apply: form.querySelector("[type=submit]")
+}));
 const leadFormat = new Intl.NumberFormat("es-CL", {maximumSignificantDigits: 15});
 let leadEdited = false, leadSaving = false;
 const isStale = () => rotorAt === null || performance.now() - rotorAt > rotor.staleMs;
@@ -195,32 +197,42 @@ async function call(url, body, method = "POST") {
   return j;
 }
 function showLead(seconds) {
-  leadInput.value = String(seconds);
   const label = leadFormat.format(seconds) + " s";
-  leadValue.textContent = label;
-  leadInput.setAttribute("aria-valuetext", label);
-}
-showLead(leadInput.valueAsNumber);
-leadInput.addEventListener("input", () => {
-  leadEdited = true;
-  showLead(leadInput.valueAsNumber);
-  leadStatus.textContent = "";
-});
-q("rot-lead-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  if (leadSaving) return;
-  leadSaving = leadInput.disabled = leadApply.disabled = true;
-  try {
-    const result = await call("/api/rotor/follow", {lead_seconds: leadInput.valueAsNumber}, "PATCH");
-    leadEdited = false;
-    showLead(result.lead_seconds);
-    leadStatus.textContent = "Adelanto de " + leadValue.textContent + " aplicado.";
-  } catch (error) {
-    leadStatus.textContent = error.message;
-  } finally {
-    leadSaving = leadInput.disabled = leadApply.disabled = false;
+  for (const {input, value} of leadControls) {
+    input.value = String(seconds);
+    value.textContent = label;
+    input.setAttribute("aria-valuetext", label);
   }
-});
+}
+showLead(leadControls[0].input.valueAsNumber);
+for (const {form, input, value} of leadControls) {
+  input.addEventListener("input", () => {
+    leadEdited = true;
+    showLead(input.valueAsNumber);
+    leadControls.forEach(({status}) => { status.textContent = ""; });
+  });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (leadSaving) return;
+    leadSaving = true;
+    leadControls.forEach(({input, apply}) => { input.disabled = apply.disabled = true; });
+    let message;
+    try {
+      const result = await call("/api/rotor/follow", {lead_seconds: input.valueAsNumber}, "PATCH");
+      leadEdited = false;
+      showLead(result.lead_seconds);
+      message = "Adelanto de " + value.textContent + " aplicado.";
+    } catch (error) {
+      message = error.message;
+    } finally {
+      leadSaving = false;
+      leadControls.forEach(({input, apply, status}) => {
+        input.disabled = apply.disabled = false;
+        status.textContent = message;
+      });
+    }
+  });
+}
 async function loadPorts() {
   try {
     const j = await call("/api/serial/ports", null, "GET"), sel = q("rot-port"), keep = sel.value || rotor.port;

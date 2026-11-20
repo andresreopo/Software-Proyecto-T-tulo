@@ -181,7 +181,7 @@ El puerto del GPS no se puede usar a la vez para la ESP32: la lista de puertos l
 ## Recepción RF real desde Maia SDR (directo a la Pluto)
 
 SatTrack se conecta directamente a Maia (puerto 8000 de la Pluto), sin servidor MaiaView intermedio:
-`WS /waterfall` (frames de 4096 float32 en dB) y `GET/PATCH /api/ad9361` (`rx_lo_frequency`,
+`WS /waterfall` (frames float32 de potencia lineal) y `GET/PATCH /api/ad9361` (`rx_lo_frequency`,
 `sampling_frequency`, `rx_rf_bandwidth`, `rx_gain`, `rx_gain_mode`). El servidor reparte cada frame
 tal cual llega a los navegadores por `WS /ws/rf` (como hacía MaiaView con `/ws`; si un navegador va
 lento se descartan frames solo para él).
@@ -194,8 +194,14 @@ python app.py --port 5003 --pluto-ip 192.168.2.1        # por defecto 192.168.2.
 formulario del AD9361 con frecuencias frecuentes (NOAA 137.5, VHF 145.8, UHF 437.5, ADS-B 1090), metadatos Fc/Span/RBW,
 escala vertical automática o manual, retención de picos, marcador de pico, suavizado, cursor, pico, frames/s y
 **doble clic para sintonizar** la frecuencia bajo el cursor. El monitor funciona sin sesión de satélite.
-SNR y detección siguen en «—» hasta definir calibración; los dB se muestran tal como llegan.
-La sintonía nunca cambia sola: la frecuencia del satélite es solo metadato orbital.
+El espectro, el nivel pico y el ruido se muestran en dB relativos a la potencia que entrega Maia. La
+SNR pico se estima como la diferencia entre el pico y la mediana del ruido.
+
+Entre AOS y LOS, SatTrack guarda una fila por pase en `data/rf_metrics.sqlite3` y la actualiza cuando
+recibe una SNR mayor en la bajada seleccionada. Busca el pico en la banda de la bajada con un margen de
+250 kHz para el Doppler y guarda la frecuencia del pico, la frecuencia central del espectro y la hora UTC
+de ese mismo frame. La captura se pausa con el pase y funciona con la pestaña cerrada. En **Monitor RF →
+Métricas del pase**, **Descargar CSV** exporta el historial.
 
 Diagnóstico: `GET /api/rf/status`. Configuración: `GET/PATCH /api/rf/config` (acepta solo las 5 claves de arriba y devuelve lo que Maia aceptó).
 
@@ -220,8 +226,8 @@ Protocolo: texto, una línea por mensaje (`\n`), 115200 baud por defecto (`rotor
 
 - **Referencia manual:** azimut/elevación + *Enviar al rotor*; *Usar az/el del satélite* copia el objetivo de la sesión.
 - **Seguir con el rotor:** con una sesión activa, lleva el rotor al punto de aparición antes del AOS y, del AOS al LOS, envía `TRK` con la posición y la velocidad angular del satélite (la ESP32 extrapola entre mensajes). Al LOS, al pausar o al detener la sesión, el rotor se queda donde está. La casilla *Seguir automáticamente al iniciar un pase* lo activa al pulsar «Iniciar próximo pase».
-- **Velocidad de simulación:** la sesión reproduce el próximo pase desde 20 s antes del AOS. A **1×** es seguimiento en tiempo real; a 5×, 10× o 20× las velocidades enviadas se multiplican y casi ningún rotor puede seguir (la interfaz avisa si el pase supera `ROTOR_MAX_RATE_AZ/EL`).
-- **Adelanto del tracker:** en **Seguimiento → Tracker · ESP32**, mueve el deslizador de 0 a 10 s en pasos de 0,1 s y pulsa **Aplicar**. Con `0` el rotor apunta a la posición del satélite en el instante del pase. Con `1,5` calcula la posición y velocidad angular 1,5 segundos después en el reloj orbital del pase. El cambio se aplica al seguimiento en curso y se conserva para los siguientes pases hasta reiniciar SatTrack. El objetivo se limita a la última posición del pase (LOS).
+- **Velocidad de simulación:** la sesión reproduce el próximo pase desde 20 s antes del AOS. El valor inicial es **1×**. A 5×, 10× o 20× las velocidades enviadas se multiplican y la interfaz avisa si el pase supera `ROTOR_MAX_RATE_AZ/EL`.
+- **Adelanto del tracker:** puedes ajustarlo en **Seguimiento → Tracker · ESP32** o junto al nombre del satélite en **Monitor RF**. Ambos controles están sincronizados. Mueve el deslizador de 0 a 300 s y pulsa **Aplicar**. El cambio se aplica al seguimiento en curso y se conserva para los siguientes pases hasta reiniciar SatTrack. El objetivo se limita a la última posición del pase (LOS).
 - **Con la ESP32 conectada**, la posición del rotor en el cielo local, la telemetría y el error de apuntamiento son los reales (`POS`); sin ella siguen simulados.
 - **Mapa:** un vector ámbar sale del observador hacia el azimut actual del rotor (punteado: objetivo) y la barra derecha muestra la elevación actual y objetivo. Si pasan más de `SERIAL_STALE_S` segundos sin `POS`, la marca se atenúa.
 - El puerto se abre con DTR/RTS en bajo para que la mayoría de las ESP32 no se reinicien al conectar. El sketch está **sin probar en una ESP32 real**; con `SIMULATE_MOTION 1` simula el rotor y sirve para verificar cable y baudios.
