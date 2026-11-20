@@ -30,7 +30,7 @@ Es el de `serial_link.py` de la interfaz unificada, más `CAL` e `IMU`.
 |---|---|
 | `SET,<az>,<el>` ir a la posición y mantenerla | `ACK` / `ERR,<motivo>` |
 | `TRK,<az>,<el>,<vaz>,<vel>` posición del satélite (°) y velocidad angular (°/s), ~5 Hz | ninguna / `ERR,<motivo>` |
-| `STOP` frenar con rampa y **borrar fallas** | `ACK` |
+| `STOP` frenar con rampa y **borrar fallas**. Durante un retroceso de azimut, lo interrumpe de inmediato | `ACK` |
 | `CAL,<az>,<el>` la antena apunta ahora a esa posición (guarda). Con azimut absoluto (por defecto) **solo calibra la elevación**: el `<az>` se ignora | `ACK` / `ERR,busy` / `ERR,no_imu` |
 | `ZERO` = `CAL,0,0` | idem |
 | `CALAX` calibración de ejes con el sensor (mueve ±20° cada eje, ~30 s; `STOP` la aborta) | `ACK` / `ERR,busy` / `ERR,no_imu` + líneas `# calax ...` |
@@ -40,17 +40,33 @@ Es el de `serial_link.py` de la interfaz unificada, más `CAL` e `IMU`.
 ESP32 → interfaz: `POS,<az>,<el>` cada 200 ms (**posición medida**, azimut en norte verdadero = rumbo magnético del sensor + declinación; si el sensor cae se deja de
 enviar y la interfaz la marca obsoleta), `BAT,<V>` cada 1 s, líneas `#` de diagnóstico.
 Motivos de `ERR`: `formato`, `invalid_target`, `queue_full`, `busy`, `no_imu`, `fault`,
-`fault_az`/`fault_el`, `unknown_command`, `line_too_long`, `line_timeout`, `invalid_character`.
+`fault_az`/`fault_el`, `fault_az_limit`, `track_wait`, `unknown_command`, `line_too_long`, `line_timeout`, `invalid_character`.
 
 ## Control
 - **SET:** velocidad proporcional al error, limitada por la rampa de frenado `sqrt(2·a·error)` para no
   pasarse; dentro de `GOTO_DEADBAND_DEG` se detiene y vigila (corrige si el sensor ve una desviación).
-- **TRK:** `velocidad = vsat + CTRL_KP·error` sobre la posición medida, con la referencia extrapolada entre
-  mensajes. Sin `TRK` por 1.5 s el rotor frena y queda en reposo (sigue hasta ~1.5 s a la velocidad del
-  satélite antes de frenar).
+- **TRK:** `velocidad = vsat + CTRL_KP·error + corrección integral` sobre la posición medida, con la referencia
+  extrapolada entre mensajes. Cada eje conserva su integral entre mensajes, para compensar el error sostenido.
+  La corrección tiene una cota y se acumula solo en la medida en que lo permiten la velocidad, la rampa y los
+  topes. Se reinicia al salir de seguimiento por `STOP`, `SET`, falta de mensajes por 1.5 s, pérdida de la
+  IMU o una falla.
 - Flujo de la interfaz: `SET` al AOS → `TRK` a 5 Hz → `SET` al LOS.
 
+En `src/RotorConfig.h`, `TRK_KI_AZ` y `TRK_KI_EL` parten en 0.8 s⁻². Un valor de 0 desactiva la integral del
+eje para comparar con el control proporcional. `TRK_MAX_INTEGRAL_DEG_S` limita su aporte a ±1.5 °/s por eje.
+Las ganancias iniciales se verificaron en simulación y se pueden ajustar con mediciones del rotor.
+
 ## Seguridad
+- **Final de carrera de azimut.** GPIO 32 se configura con `INPUT_PULLUP`. El interruptor debe llevar
+  la entrada a GND al activarse. El primer LOW cancela los movimientos de ambos ejes y `CALAX`, y
+  emite `ERR,fault_az_limit`. SatTrack detiene el envío de referencias. Solo azimut puede moverse
+  durante el retroceso, en sentido contrario al del último paso normal y a un máximo de 100 micropasos/s.
+  Al detectar HIGH se detiene y verifica que el contacto siga liberado durante 30 ms antes del STOP
+  automático. Si hay rebote se puede continuar en el mismo sentido hasta el límite total de 3°.
+  Si el contacto sigue presionado tras esos 3°, si no hubo un paso de azimut en los últimos 250 ms
+  (por ejemplo, si arranca presionado) o si llega `STOP`, se bloquea el retroceso hasta que se libere
+  el contacto. El firmware queda en reposo y necesita una referencia nueva. Las secuencias continuas
+  de `TRK` se descartan con `ERR,track_wait` hasta que haya una pausa de 1.5 s entre mensajes.
 - **Sensor caído** (sin datos por `IMU_TIMEOUT_MS`): frena, olvida el objetivo, rechaza `SET/TRK` con
   `ERR,no_imu` y deja de enviar `POS`. Al volver el sensor espera una orden nueva.
 - **Detector de fallas:** cada `FAULT_WINDOW_MS` (4 s) compara el movimiento esperado (pasos enviados) con el
@@ -123,7 +139,21 @@ memoria. También informa:
   la posición; solo fijan las velocidades y el detector de fallas.
 
 ## Pruebas realizadas
-Compilado en PC con stubs de Arduino/FreeRTOS/BNO08x (no con el core real del ESP32) y simulación con planta
+El control PI se verifica con regresiones de convergencia, saturación, rampa, reinicio y tope mecánico en
+`tests/track_pi_checks.cpp`. Desde esta carpeta, puedes compilar y ejecutar las pruebas en Windows
+con GNU C++.
+
+```powershell
+$testExe = Join-Path $env:TEMP 'rotor-track-pi-checks.exe'
+g++ -std=c++11 -Isrc tests/track_pi_checks.cpp -o $testExe
+if ($LASTEXITCODE -eq 0) { & $testExe }
+```
+
+Para compilar el firmware para `esp32dev`, ejecuta `pio run` desde esta carpeta.
+El mismo comando de pruebas de PC con `tests/az_limit_checks.cpp` comprueba el sentido del retroceso,
+los rebotes, el límite de pasos, la cancelación con STOP y el rechazo de las referencias `TRK` anteriores.
+
+La versión anterior del control se probó en PC con stubs de Arduino/FreeRTOS/BNO08x y simulación con planta
 ideal, ruido de ±0.15° y 20 ms de latencia en el sensor: SET con error final ≈ 0.2° y sin deriva al mantener;
 seguimiento a 3 °/s con error máx. 0.15° (az) y 0.05° (el); `CAL` con offset de 37°; detección de sentido
 invertido; sensor caído y recuperación. Falta validar con hardware real.

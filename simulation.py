@@ -27,7 +27,7 @@ def _move(current, target, limit):
 
 
 class SimulationSession:
-    def __init__(self, record, observer, transmitter, speed=10, azimuth=None, hours=None):
+    def __init__(self, record, observer, transmitter, speed=1, azimuth=None, hours=None):
         self.id = uuid.uuid4().hex
         self.record = record
         self.observer = dict(observer)

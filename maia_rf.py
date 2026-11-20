@@ -2,11 +2,12 @@
 
 Servicios usados (puerto 8000 de Maia):
   GET/PATCH /api/ad9361  -> rx_lo_frequency, sampling_frequency, rx_rf_bandwidth, rx_gain, rx_gain_mode
-  WS        /waterfall   -> frames binarios de 4096 float32 little-endian (dB)
+  WS        /waterfall   -> frames binarios float32 little-endian de potencia lineal
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import threading
@@ -19,6 +20,7 @@ import websocket
 DEFAULT_MAIA_URL = "http://192.168.2.1:8000"   # IP de fábrica de la Pluto (igual que MaiaView)
 STALE_AFTER_S = 2.0          # sin bloques por este tiempo => ya no se considera "streaming"
 CONFIG_POLL_S = 2.0
+RETUNE_SETTLE_S = 0.25
 
 
 class MaiaRFClient:
@@ -43,6 +45,9 @@ class MaiaRFClient:
         }
         self._cfg_thread = None
         self._subs: set[queue.Queue] = set()
+        self._spectrum_config = (0, None)  # ajuste DDC y ancho del espectro, si Maia usa DDC
+        self._settle_until = 0.0
+        self.on_frame = None
 
     def set_url(self, base_url: str):
         """Cambia la dirección de Maia (antes de start())."""
@@ -76,20 +81,34 @@ class MaiaRFClient:
     def snapshot(self):
         with self._lock:
             state = dict(self._state)
+            state["center_freq_hz"], state["span_hz"] = self._spectrum_coordinates()
         last = state["last_frame_unix"]
         if state["streaming"] and last is not None and time.time() - last > STALE_AFTER_S:
             state["streaming"] = False
             state["maia_status"] = "stalled"
-        cfg = state["config"] or {}
-        fc, fs = cfg.get("rx_lo_frequency"), cfg.get("sampling_frequency")
-        state["center_freq_hz"] = float(fc) if fc is not None else None
-        state["span_hz"] = float(fs) if fs is not None else None
         return state
 
-    def set_config(self, cfg):
+    def _spectrum_coordinates(self):
+        cfg = self._state["config"] or {}
+        offset, ddc_span = self._spectrum_config
+        try:
+            center = float(cfg["rx_lo_frequency"]) + offset
+            span = float(cfg["sampling_frequency"] if ddc_span is None else ddc_span)
+        except (TypeError, ValueError, KeyError):
+            return None, None
+        if not math.isfinite(center) or not math.isfinite(span) or center <= 0 or span <= 0:
+            return None, None
+        return center, span
+
+    def set_config(self, cfg, spectrum_config=None):
         """Actualiza la copia de la configuración (p. ej. tras un PATCH exitoso)."""
         with self._lock:
+            previous = self._spectrum_coordinates()
             self._state["config"] = cfg
+            if spectrum_config is not None:
+                self._spectrum_config = spectrum_config
+            if self._spectrum_coordinates() != previous:
+                self._settle_until = time.monotonic() + RETUNE_SETTLE_S
 
     # ── Relay hacia los navegadores (un Queue por cliente; si va lento, descarta el más viejo) ──
     def subscribe(self):
@@ -121,13 +140,27 @@ class MaiaRFClient:
     def _config_worker(self):
         while self._is_running():
             try:
-                r = requests.get(f"{self.base_url}/api/ad9361", timeout=2)
-                r.raise_for_status()
-                with self._lock:
-                    self._state["config"] = r.json()
-            except (requests.RequestException, ValueError):
+                self._refresh_config()
+            except (requests.RequestException, ValueError, TypeError, KeyError):
                 pass  # el estado de conexión lo informa el WS; la config queda con el último valor
             time.sleep(CONFIG_POLL_S)
+
+    def _refresh_config(self):
+        response = requests.get(f"{self.base_url}/api", timeout=2)
+        try:
+            state = response.json() if response.ok else None
+        except ValueError:
+            state = None
+        if isinstance(state, dict) and isinstance(state.get("ad9361"), dict):
+            spectrometer = state.get("spectrometer", {})
+            geometry = (0, None)
+            if str(spectrometer.get("input", "")).upper() == "DDC":
+                geometry = (float(state["ddc"]["frequency"]), spectrometer["input_sampling_frequency"])
+            self.set_config(state["ad9361"], geometry)
+            return
+        response = requests.get(f"{self.base_url}/api/ad9361", timeout=2)
+        response.raise_for_status()
+        self.set_config(response.json(), (0, None))
 
     def _is_running(self):
         with self._lock:
@@ -182,14 +215,20 @@ class MaiaRFClient:
             return  # Maia solo envía frames binarios por /waterfall
         if not isinstance(message, (bytes, bytearray, memoryview)) or len(message) < 256 or len(message) % 4:
             return
+        received_at = time.time()
         with self._lock:
             self._state["streaming"] = True
             self._state["frames_received"] += 1
             self._state["sample_count"] = len(message) // 4
-            self._state["last_frame_unix"] = time.time()
+            self._state["last_frame_unix"] = received_at
             self._state["error"] = None
+            center, span = self._spectrum_coordinates()
+            settled = time.monotonic() >= self._settle_until
         # float32 little-endian tal como llega; el navegador lo interpreta con Float32Array.
-        self._broadcast(bytes(message))
+        frame = bytes(message)
+        self._broadcast(frame)
+        if self.on_frame is not None and settled and center is not None:
+            self.on_frame(frame, center, span, received_at)
 
 
 maia_rf = MaiaRFClient()

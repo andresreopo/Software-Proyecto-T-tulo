@@ -120,6 +120,8 @@ class RotorFollower:
         last_err = None
         while not stop.is_set():
             sim_now, speed, paused, stopped = session.clock()
+            if stop.is_set():
+                return
             if stopped:
                 self.stop(hold=True)
                 return
@@ -165,6 +167,8 @@ class RotorFollower:
                     el_cmd = min(max(el, cfg.ROTOR_EL_MIN), cfg.ROTOR_EL_MAX)
                     if el_cmd != el:                                     # el rotor no puede ir más allá del límite
                         vel = 0.0
+                    if stop.is_set():
+                        return
                     self._link.send_track(az, el_cmd, vaz, vel)
                     self._set(status="tracking", speed=speed, error=None, az=az, el=el_cmd, vaz=vaz, vel=vel,
                               t_to_aos=0.0, t_to_los=seconds_to_los / speed)
