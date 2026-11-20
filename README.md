@@ -1,5 +1,8 @@
 # Comentarios de versión
 # SATTRACK
+V15:
+- Puerto GPS actualizado
+- IP de inicio de interfaz actualizada, permite conexión local a través de otro computador
 V14:
 - Arreglo de bug de envío de STOP en modo TRK
 
@@ -47,6 +50,9 @@ V5:
 - Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
 
 # FIRMWARE
+V7:
+- Limit switch azimutal añadido
+
 V6: 
 - Arreglo de firmware por largo de cables, disminuye freq i2c
 - Arreglo de bug de inicialización de BNO, watchdog añadido 

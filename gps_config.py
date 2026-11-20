@@ -1,6 +1,6 @@
 """Parámetros del GPS (ATGM366H por UART): puerto, velocidad y criterios de calidad del fix."""
 
-GPS_PORT = "/dev/ttyS0"     # UART de la Raspberry Pi; en Windows/otros usa --gps-port o SATTRACK_GPS_PORT
+GPS_PORT = "/dev/serial0"     # UART de la Raspberry Pi; en Windows/otros usa --gps-port o SATTRACK_GPS_PORT
 GPS_BAUD = 9600             # ATGM366H: 9600 baud de fábrica
 GPS_RETRY_S = 3.0           # reintento si el puerto no abre o se cae
 
