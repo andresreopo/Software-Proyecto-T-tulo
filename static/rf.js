@@ -1,5 +1,5 @@
 /* Monitor RF — portado de MaiaView (server/templates/index.html).
- * Recibe potencia lineal float32 por /ws/rf y dibuja espectro y waterfall en dB relativos
+ * Recibe potencia lineal float32 por /ws/rf y dibuja espectro y waterfall en esa escala
  * y controla el AD9361 por /api/rf/config. Depende de log() y toast() de app.js. */
 (() => {
 "use strict";
@@ -16,11 +16,11 @@ bctx.fillStyle = css("--bg"); bctx.fillRect(0, 0, wfBuf.width, wfBuf.height);
 let cfg = {freq: 0, rate: 0};
 let N = 0;
 let smooth = null;
-// Integrador: promedio móvil exponencial de potencia lineal antes de convertir a dB, con arranque
+// Integrador: promedio móvil exponencial de potencia lineal, con arranque
 // en promedio acumulado. Con M frames la desviación del ruido baja ≈ √M, así que las señales débiles emergen del piso.
-let lin = null, integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noiseDb = null;
-function resetIntegration() { lin = null; smooth = null; integSeen = 0; noiseDb = null; }
-let lo = -120, hi = -20;
+let integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noisePower = null;
+function resetIntegration() { smooth = null; integSeen = 0; noisePower = null; }
+let lo = 0, hi = 1;
 let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
 const PAD = {l: 60, r: 24, t: 10, b: 28};
 
@@ -47,10 +47,16 @@ function niceStep(range, target) {
   const raw = range / target, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
 }
-const fmtDb = (v, sy) => v.toFixed(sy < 1 ? 1 : 0) + " dB";
 const powerDb = power => 10 * Math.log10(power);
 const validPower = power => Number.isFinite(power) && power > 0;
 const trimZeros = (v, d) => v.toFixed(d).replace(/\.?0+$/, "");
+function fmtPower(value, step) {
+  if (value === 0) return "0";
+  const scale = value >= 1e6 ? 1e6 : value >= 1e4 ? 1e3 : 1;
+  const unit = scale === 1e6 ? "M" : scale === 1e3 ? "k" : "";
+  const precision = Math.max(1, Math.ceil(-Math.log10(step / scale)));
+  return precision > 6 ? value.toExponential(2) : trimZeros(value / scale, precision) + unit;
+}
 const fmtMHz = v => v.toFixed(4) + " MHz";
 const fmtHz = v => v >= 1e6 ? (v / 1e6).toFixed(3) + " MHz" : v >= 1e3 ? (v / 1e3).toFixed(2) + " kHz" : v.toFixed(0) + " Hz";
 
@@ -91,7 +97,7 @@ function drawSpectrum() {
   // El margen izquierdo se ajusta al ancho de las etiquetas para que el número siempre quepa.
   if (cfg.rate && hi > lo) {
     const sy0 = niceStep(hi - lo, 4); sctx.font = "16px " + css("--mono");
-    const wmax = Math.max(sctx.measureText(fmtDb(lo, sy0)).width, sctx.measureText(fmtDb(hi, sy0)).width);
+    const wmax = Math.max(sctx.measureText(fmtPower(lo, sy0)).width, sctx.measureText(fmtPower(hi, sy0)).width);
     PAD.l = Math.max(60, Math.ceil(wmax) + 14);
   }
   const g = prep(specC, sctx, 4);
@@ -105,7 +111,7 @@ function drawSpectrum() {
   for (let v = Math.ceil(lo / sy) * sy; v <= hi; v += sy) {
     const y = Math.round(Y(v)) + .5;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke();
-    sctx.fillText(fmtDb(v, sy), g.x0 - 6, y);
+    sctx.fillText(fmtPower(v, sy), g.x0 - 6, y);
   }
   freqAxis(sctx, g, border, false);
   sctx.strokeStyle = border; sctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
@@ -122,12 +128,12 @@ function drawSpectrum() {
     sctx.stroke();
   };
     line(smooth, css("--cyan"), 1.4);
-  if (noiseDb !== null && q("rx-noise-line").checked) {
-    const y = Y(noiseDb);
+  if (noisePower !== null && q("rx-noise-line").checked) {
+    const y = Y(noisePower);
     sctx.save(); sctx.setLineDash([6, 4]); sctx.strokeStyle = css("--amber"); sctx.lineWidth = 1.2;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke(); sctx.restore();
     sctx.fillStyle = css("--amber"); sctx.font = "14px " + css("--mono"); sctx.textAlign = "right"; sctx.textBaseline = "bottom";
-    sctx.fillText("ruido " + fmtDb(noiseDb, .1), g.x1 - 4, y - 2);
+    sctx.fillText("ruido " + fmtPower(noisePower, noisePower * .01), g.x1 - 4, y - 2);
   }
 
   {
@@ -175,16 +181,20 @@ function draw() {
   requestAnimationFrame(() => { drawPending = false; if (q("panel-rf").hidden) return; drawSpectrum(); drawWaterfall(); });
 }
 
-// ── Escala vertical automática (rango fijo en múltiplos de 10 dB; se contrae tras ~3 s) ──
+// ── Escala vertical automática en potencia lineal ────────────────────────────
 let shrinkFrames = 0, rangeInit = false;
 function autoScale() {
   let mn = Infinity, mx = -Infinity;
   for (let i = 0; i < N; i++) { const v = smooth[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
-  const tlo = Math.floor((mn - 5) / 10) * 10, thi = Math.ceil((mx + 5) / 10) * 10;
+  const padding = Math.max((mx - mn) * .05, mx * .01);
+  const step = niceStep(mx - mn + 2 * padding, 4);
+  const tlo = Math.max(0, Math.floor((mn - padding) / step) * step);
+  const thi = Math.ceil((mx + padding) / step) * step;
   if (!rangeInit) { lo = tlo; hi = thi; rangeInit = true; return; }
   if (tlo < lo) lo = tlo;
   if (thi > hi) hi = thi;
-  shrinkFrames = (tlo > lo + 10 || thi < hi - 10) ? shrinkFrames + 1 : 0;
+  const slack = (hi - lo) * .15;
+  shrinkFrames = (tlo > lo + slack || thi < hi - slack) ? shrinkFrames + 1 : 0;
   if (shrinkFrames > 60) { lo = tlo; hi = thi; shrinkFrames = 0; }
 }
 
@@ -217,17 +227,16 @@ function onSpectrum(buf) {
   const nowT = performance.now();
   if (prevFrameT && nowT - prevFrameT < 2000) fps = fps ? 0.9 * fps + 0.1 * (1000 / (nowT - prevFrameT)) : 1000 / (nowT - prevFrameT);
   prevFrameT = nowT;
-  if (!lin || lin.length !== N) {
-    lin = new Float64Array(N); smooth = new Float32Array(N); integSeen = 0;
+  if (!smooth || smooth.length !== N) {
+    smooth = new Float64Array(N); integSeen = 0; noisePower = null;
   }
   const fill = integSeen === 0 && bad ? a.filter(validPower).sort()[Math.floor((N - bad) / 2)] : 0;
   integSeen++;
   const alpha = 1 / Math.min(integM, integSeen);
   for (let i = 0; i < N; i++) {
     const v = a[i];
-    if (integSeen === 1) lin[i] = validPower(v) ? v : fill;
-    else if (validPower(v)) lin[i] += alpha * (v - lin[i]);
-    smooth[i] = powerDb(lin[i]);
+    if (integSeen === 1) smooth[i] = validPower(v) ? v : fill;
+    else if (validPower(v)) smooth[i] += alpha * (v - smooth[i]);
   }
   autoScale();
   pushWaterfallRow(smooth);          // la cascada también muestra la señal integrada
@@ -237,10 +246,11 @@ function onSpectrum(buf) {
     lastPeakTxt = now;
     const pk = peakIndex(smooth), fpk = cfg.freq + (pk - Math.floor(N / 2)) * cfg.rate / N;
     q("rx-peak-big").textContent = cfg.rate ? trimZeros(fpk / 1e6, 4) : "—";
-    noiseDb = estimateNoise(smooth);
-    q("rx-power").textContent = smooth[pk].toFixed(1);
+    noisePower = estimateNoise(smooth);
+    const peakDb = powerDb(smooth[pk]), noiseDb = powerDb(noisePower);
+    q("rx-power").textContent = peakDb.toFixed(1);
     q("rx-noise").textContent = noiseDb.toFixed(1);
-    q("rx-snr").textContent = (smooth[pk] - noiseDb).toFixed(1);
+    q("rx-snr").textContent = (peakDb - noiseDb).toFixed(1);
     q("rx-integ-note").textContent = integM === 1 ? "Sin promedio" :
       `Promedio de ${integM} frames` + (fps > 0.5 ? ` ≈ ${(integM / fps).toFixed(integM / fps < 10 ? 1 : 0)} s` : "") + (integSeen < integM ? ` · acumulando ${integSeen}/${integM}` : "");
     q("rx-integ-in").textContent = `Entrada: ${powerDb(mn).toFixed(1)} … ${powerDb(mx).toFixed(1)} dB`

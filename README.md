@@ -194,8 +194,9 @@ python app.py --port 5003 --pluto-ip 192.168.2.1        # por defecto 192.168.2.
 formulario del AD9361 con frecuencias frecuentes (NOAA 137.5, VHF 145.8, UHF 437.5, ADS-B 1090), metadatos Fc/Span/RBW,
 escala vertical automática o manual, retención de picos, marcador de pico, suavizado, cursor, pico, frames/s y
 **doble clic para sintonizar** la frecuencia bajo el cursor. El monitor funciona sin sesión de satélite.
-El espectro, el nivel pico y el ruido se muestran en dB relativos a la potencia que entrega Maia. La
-SNR pico se estima como la diferencia entre el pico y la mediana del ruido.
+El espectro y la cascada muestran la potencia lineal de Maia. El eje vertical abrevia miles como
+`k` y millones como `M`. Las lecturas de nivel pico y ruido se expresan en dB relativos. La SNR pico
+se estima como la diferencia entre el pico y la mediana del ruido.
 
 Entre AOS y LOS, SatTrack guarda una fila por pase en `data/rf_metrics.sqlite3` y la actualiza cuando
 recibe una SNR mayor en la bajada seleccionada. Busca el pico en la banda de la bajada con un margen de
