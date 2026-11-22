@@ -79,7 +79,8 @@ constexpr int IMU_RST_PIN = -1;
 // Sin datos del sensor por este tiempo -> los motores frenan y se deja de enviar POS.
 constexpr uint32_t IMU_TIMEOUT_MS = 300;
 constexpr bool PRINT_BNO_DATA = true;
-constexpr uint32_t BNO_PRINT_PERIOD_MS = 50;  // hasta 20 muestras por segundo
+constexpr uint16_t BNO_SENSOR_REPORT_MS = 100;  // acelerómetro y giroscopio para el CSV
+constexpr uint32_t BNO_PRINT_PERIOD_MS = 50;    // revisar si hay una fila nueva
 
 // Precisión del sensor: estado de calibración del magnetómetro (MagAcc) y de la fusión.
 // Niveles: 0=Unreliable 1=Low 2=Medium 3=High. El magnetómetro se pide a este período solo

@@ -16,9 +16,12 @@ import serial
 
 BNO_PREFIX = b"BNO,"
 CSV_HEADER = (
-    "pc_utc", "esp_ms", "muestra", "qw", "qx", "qy", "qz",
-    "estado_precision", "error_estimado_deg", "az_sin_offset_deg",
-    "el_sin_offset_deg",
+    "pc_utc", "esp_ms", "muestra",
+    "acel_x_m_s2", "acel_y_m_s2", "acel_z_m_s2",
+    "giro_x_rad_s", "giro_y_rad_s", "giro_z_rad_s",
+    "mag_x_ut", "mag_y_ut", "mag_z_ut",
+    "estado_precision", "error_estimado_deg", "az_sin_offset_deg", "el_sin_offset_deg",
+    "az_objetivo_deg", "el_objetivo_deg",
 )
 
 
@@ -30,18 +33,19 @@ def parse_bno(line: bytes) -> list[int | float | str] | None:
         return None
     try:
         esp_ms, sample_id = map(int, fields[:2])
-        accuracy_status = int(fields[6])
-        quaternion = [float(field) for field in fields[2:6]]
-        angles = [float(field) for field in fields[7:]]
+        vectors = [float(field) for field in fields[2:11]]
+        accuracy_status = int(fields[11])
+        angles = [float(field) for field in fields[12:]]
     except ValueError:
         return None
     if not (0 <= esp_ms <= 0xFFFFFFFF and 0 <= sample_id <= 0xFFFFFFFF
             and 0 <= accuracy_status <= 3):
         return None
-    if any(math.isinf(value) for value in quaternion + angles):
+    if not all(math.isfinite(value) for value in vectors) or any(math.isinf(value) for value in angles):
         return None
-    return [esp_ms, sample_id,
-            *("" if math.isnan(value) else value for value in quaternion),
+    if math.isnan(angles[-2]) != math.isnan(angles[-1]):
+        return None
+    return [esp_ms, sample_id, *vectors,
             accuracy_status, *("" if math.isnan(value) else value for value in angles)]
 
 

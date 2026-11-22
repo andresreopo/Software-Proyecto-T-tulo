@@ -15,7 +15,7 @@ V14:
 V13:
 - Filtro de pases por sector de azimut de 0° a 360°
 - Nombre del satélite en seguimiento en Monitor RF
-- Grabación de cuaterniones de la BNO085 en CSV desde Seguimiento
+- Grabación de acelerómetro, giroscopio y magnetómetro de la BNO085 en CSV desde Seguimiento
 
 V12:
 - Filtro de banda L añadido
@@ -221,7 +221,9 @@ Diagnóstico: `GET /api/rf/status`. Configuración: `GET/PATCH /api/rf/config` (
 2. Pulsa **Grabar BNO** y espera a que suba el contador de muestras. Puedes grabar mientras haces seguimiento.
 3. Pulsa **Detener captura** y luego **Descargar CSV**. SATTRACK deja una copia en `data/bno/`. Si se pierde el enlace serial, puedes descargar lo que se alcanzó a grabar.
 
-El CSV incluye los cuaterniones `qw`, `qx`, `qy` y `qz`, la hora de recepción en UTC, el contador de la ESP32, la precisión y los ángulos antes de aplicar los offsets. Para probar sin hardware, elige el puerto `sim`. La interfaz indica que son muestras simuladas y el nombre del archivo comienza con `bno_sim_`.
+El CSV incluye los tres ejes del acelerómetro (m/s², con gravedad), giroscopio (rad/s) y magnetómetro (µT), en el sistema de coordenadas del sensor. También guarda la hora de recepción en UTC, el contador de la ESP32, la precisión y los ángulos medidos antes de aplicar los offsets.
+
+`az_objetivo_deg` y `el_objetivo_deg` contienen la referencia `SET` o `TRK` activa que recibió la ESP32. Mientras el rotor está sin una referencia activa, esas dos columnas quedan vacías. Las capturas nuevas requieren el firmware de esta rama. Para probar con el puerto `sim`, SatTrack identifica las lecturas sintéticas y usa el prefijo `bno_sim_`.
 
 También se puede usar `capturar_bno.py` desde la terminal con la ESP32 desconectada de SATTRACK.
 

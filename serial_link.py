@@ -106,6 +106,7 @@ class SimPort:
         self.AZ_RATE, self.EL_RATE = config.ROTOR_MAX_RATE_AZ, config.ROTOR_MAX_RATE_EL
         self.az, self.el = 0.0, 0.0
         self.tgt = (0.0, 0.0)
+        self._has_target = False
         self.trk = False
         self.ff = (0.0, 0.0)
         self.trk_t = 0.0
@@ -123,15 +124,18 @@ class SimPort:
             try:
                 if len(p) == 3 and p[0].upper() == "SET":
                     self.tgt = (float(p[1]) % 360.0, float(p[2]))
+                    self._has_target = True
                     self.trk, self.ff = False, (0.0, 0.0)
                     self._q.put(b"ACK\n")
                 elif len(p) == 1 and p[0].upper() == "STOP":
                     self.tgt = (self.az, self.el)
+                    self._has_target = False
                     self.trk, self.ff = False, (0.0, 0.0)
                     self._q.put(b"ACK\n")
                 elif len(p) == 5 and p[0].upper() == "TRK":
                     self.tgt = (float(p[1]) % 360.0, float(p[2]))
                     self.ff = (float(p[3]), float(p[4]))
+                    self._has_target = True
                     self.trk, self.trk_t = True, time.monotonic()
                 elif p[0].upper() in ("SET", "TRK"):
                     self._q.put(b"ERR,formato\n")
@@ -146,6 +150,7 @@ class SimPort:
         if self.trk and now - self.trk_t > self.TRK_TIMEOUT:      # dejaron de llegar TRK: mantener
             self.trk, self.ff = False, (0.0, 0.0)
             self.tgt = (self.az, self.el)
+            self._has_target = False
         if self.trk:
             age = now - self.trk_t
             t_az = self.tgt[0] + self.ff[0] * age                  # extrapola la referencia
@@ -166,20 +171,24 @@ class SimPort:
         try:
             return self._q.get(timeout=self.PERIOD)
         except queue.Empty:
+            az_before, el_before, before = self.az, self.el, self._t
             self._step()
             now = time.monotonic()
             if now - self._bat_t >= 1.0:                   # batería simulada ~12.6 V con una ligera oscilación
                 self._bat_t = now
                 self._q.put(f"BAT,{12.6 + 0.05 * math.sin(now / 5.0):.2f}\n".encode())
-            # Cuaternión sintético para probar la captura con el rotor simulado.
+            # Vectores sintéticos para probar la captura con el rotor simulado.
             self._sample_id = (self._sample_id + 1) & 0xFFFFFFFF
             esp_ms = int((now - self._start) * 1000) & 0xFFFFFFFF
-            yaw, pitch = math.radians(-self.az) / 2, math.radians(self.el) / 2
-            cw, sw = math.cos(yaw), math.sin(yaw)
-            cp, sp = math.cos(pitch), math.sin(pitch)
+            yaw, pitch = math.radians(self.az), math.radians(self.el)
+            dt = max(self._t - before, 1e-6)
+            gyro_el = math.radians(self.el - el_before) / dt
+            gyro_az = math.radians((self.az - az_before + 180.0) % 360.0 - 180.0) / dt
+            target = f"{self.tgt[0]:.5f},{self.tgt[1]:.5f}" if self._has_target else "nan,nan"
             self._q.put(
-                f"BNO,{esp_ms},{self._sample_id},{cw * cp:.7f},{cw * sp:.7f},"
-                f"{sw * sp:.7f},{sw * cp:.7f},0,nan,{self.az:.5f},{self.el:.5f}\n".encode()
+                f"BNO,{esp_ms},{self._sample_id},{9.81 * math.sin(pitch):.5f},0,{9.81 * math.cos(pitch):.5f},"
+                f"0,{gyro_el:.6f},{gyro_az:.6f},{35 * math.cos(yaw):.4f},{-35 * math.sin(yaw):.4f},40,"
+                f"0,nan,{self.az:.5f},{self.el:.5f},{target}\n".encode()
             )
             return f"POS,{self.az:.2f},{self.el:.2f}\n".encode()
 

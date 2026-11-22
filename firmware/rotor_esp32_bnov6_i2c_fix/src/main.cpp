@@ -144,7 +144,6 @@ struct Pose {
   float accuracyDeg = NAN;      // precisión estimada que informa el sensor
   uint8_t fusionAcc = 0;        // calidad de la fusión: 0=Unreliable .. 3=High
   uint8_t magAcc = 0;           // calibración del magnetómetro: 0=Unreliable .. 3=High
-  uint32_t sampleId = 0;        // contador de reportes de orientación desde el arranque
   uint32_t ms = 0;              // millis() de la última medición
   bool everValid = false;
 };
@@ -162,11 +161,24 @@ struct MotionState {
   uint32_t activeCommandId = 0;  // última orden ya procesada por motionTask
   Fault fault = FaultNone;
   uint32_t azLimitTrips = 0;
+  double targetAz = NAN, targetEl = NAN;  // última referencia SET/TRK activa, antes de extrapolar
   // Detalle de la última evaluación de falla (válido si fault != FaultNone).
   float faultExpectedDeg = 0;  // movimiento esperado según pasos enviados (con signo)
   float faultMeasuredDeg = 0;  // movimiento medido por el sensor en esa ventana
   float faultWindowS = 0;      // duración de la ventana
   float faultElDeg = 0;        // elevación medida al detectar
+};
+
+enum BnoVector { Accel, Gyro, Mag, BnoVectorCount };
+
+struct BnoSample {
+  uint32_t ms = 0, id = 0;
+  bool valid = false;
+  float vectors[BnoVectorCount][3] = {};
+  uint8_t fusionAcc = 0;
+  float accuracyDeg = NAN;
+  double rawAz = NAN, rawEl = NAN;
+  double targetAz = NAN, targetEl = NAN;
 };
 
 // Datos crudos de una CALAX terminada; los entrega motionTask y los procesa loop().
@@ -185,6 +197,7 @@ portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;  // protege sharedState
 portMUX_TYPE poseMux = portMUX_INITIALIZER_UNLOCKED;   // protege pose y offsets
 MotionState sharedState;
 Pose sharedPose;
+BnoSample sharedBno;
 double azOffset = cfg::MAG_DECLINATION_DEG;  // rumbo magnético -> norte verdadero (° + CAL si no es absoluto)
 double elOffset = cfg::EL_OFFSET;                         // corrección de elevación (°)
 // Eje de la antena en el marco del sensor. Parte con el valor de RotorConfig.h y CALAX lo
@@ -224,6 +237,13 @@ Pose poseSnapshot() {
   portEXIT_CRITICAL(&poseMux);
   return copy;
 }
+
+BnoSample bnoSnapshot() {
+  portENTER_CRITICAL(&poseMux);
+  const BnoSample copy = sharedBno;
+  portEXIT_CRITICAL(&poseMux);
+  return copy;
+}
 // ¿La medición es reciente? Con un sensor caído no se debe mover nada.
 bool poseFresh(const Pose &pose, uint32_t nowMs) {
   return pose.everValid && nowMs - pose.ms <= cfg::IMU_TIMEOUT_MS;
@@ -237,6 +257,67 @@ void note(const char *text) { controlUart.print("# "); controlUart.println(text)
 //  SENSOR BNO085
 // ═════════════════════════════════════════════════════════════════════════════
 BNO080 bno08x;  // librería SparkFun (sin pines INT/RST)
+// Solo imuTask toca este conjunto de reportes pendientes.
+struct BnoReading {
+  float values[3] = {};
+  uint32_t at = 0;
+  bool pending = false;
+};
+BnoReading bnoReadings[BnoVectorCount];
+uint32_t bnoSampleId = 0;
+
+void resetBnoCapture() {
+  for (auto &reading : bnoReadings) reading.pending = false;
+  portENTER_CRITICAL(&poseMux);
+  sharedBno.valid = false;
+  portEXIT_CRITICAL(&poseMux);
+}
+
+void collectBnoVector(uint16_t reportId) {
+  using Getter = void (BNO080::*)(float &, float &, float &, uint8_t &);
+  BnoVector vector;
+  Getter read;
+  switch (reportId) {
+    case SENSOR_REPORTID_ACCELEROMETER: vector = Accel; read = &BNO080::getAccel; break;
+    case SENSOR_REPORTID_GYROSCOPE: vector = Gyro; read = &BNO080::getGyro; break;
+    case SENSOR_REPORTID_MAGNETIC_FIELD: vector = Mag; read = &BNO080::getMag; break;
+    default: return;
+  }
+  auto &reading = bnoReadings[vector];
+  auto &v = reading.values;
+  uint8_t accuracy;
+  (bno08x.*read)(v[0], v[1], v[2], accuracy);
+  reading.at = millis();
+  reading.pending = true;
+}
+
+void publishBnoSample() {
+  const uint32_t now = millis();
+  for (const auto &reading : bnoReadings) {
+    if (!reading.pending || now - reading.at > cfg::IMU_TIMEOUT_MS) return;
+  }
+  const Pose pose = poseSnapshot();
+  if (!poseFresh(pose, now)) return;
+  const MotionState motion = motionSnapshot();
+
+  BnoSample sample;
+  sample.ms = now;
+  sample.id = ++bnoSampleId;
+  sample.valid = true;
+  sample.fusionAcc = pose.fusionAcc;
+  sample.accuracyDeg = pose.accuracyDeg;
+  sample.rawAz = pose.rawAz;
+  sample.rawEl = pose.rawEl;
+  sample.targetAz = motion.targetAz;
+  sample.targetEl = motion.targetEl;
+  for (unsigned i = 0; i < BnoVectorCount; ++i) {
+    std::memcpy(sample.vectors[i], bnoReadings[i].values, sizeof(sample.vectors[i]));
+    bnoReadings[i].pending = false;
+  }
+  portENTER_CRITICAL(&poseMux);
+  sharedBno = sample;
+  portEXIT_CRITICAL(&poseMux);
+}
 bool imuReady = false;
 uint32_t imuLastTryMs = 0;
 bool wireStarted = false;
@@ -268,9 +349,15 @@ void imuEnableReport() {
   const uint16_t ms = static_cast<uint16_t>(cfg::IMU_REPORT_US / 1000 > 0 ? cfg::IMU_REPORT_US / 1000 : 1);
   if (cfg::IMU_USE_GAME_ROTATION) bno08x.enableGameRotationVector(ms);
   else bno08x.enableRotationVector(ms);
-  if (cfg::IMU_MAG_REPORT_US > 0 || magCalActive) {
+  if (cfg::IMU_MAG_REPORT_US > 0 || magCalActive || cfg::PRINT_BNO_DATA) {
     const uint32_t magUs = cfg::IMU_MAG_REPORT_US > 0 ? cfg::IMU_MAG_REPORT_US : 50000;
     bno08x.enableMagnetometer(static_cast<uint16_t>(magUs / 1000 > 0 ? magUs / 1000 : 1));
+  }
+  if (cfg::PRINT_BNO_DATA) {
+    resetBnoCapture();
+    // Usar intervalos distintos para reducir coincidencias con el vector de rotación.
+    bno08x.enableAccelerometer(cfg::BNO_SENSOR_REPORT_MS + 3);
+    bno08x.enableGyro(cfg::BNO_SENSOR_REPORT_MS + 7);
   }
 }
 
@@ -365,7 +452,6 @@ void publishPose(double w, double x, double y, double z, float accuracyRad, uint
   sharedPose.el = rawEl + elOffset;
   sharedPose.accuracyDeg = accuracyRad * static_cast<float>(180.0 / M_PI);
   sharedPose.fusionAcc = fusionAcc;
-  ++sharedPose.sampleId;
   sharedPose.ms = now;
   sharedPose.everValid = true;
   portEXIT_CRITICAL(&poseMux);
@@ -433,16 +519,19 @@ void imuPoll() {
     const uint16_t id = bno08x.getReadings();  // id del reporte recibido (0 = nada)
     if (id == 0) break;
     gotData = true;
-    // Solo la orientación refresca la pose; el reporte del magnetómetro solo da MagAcc.
+    // Solo la orientación refresca la pose usada por el control.
     if (id == SENSOR_REPORTID_ROTATION_VECTOR || id == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
       publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
                   cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy(),
                   bno08x.getQuatAccuracy());
       imuLastReportMs = millis();
       imuRestartCount = 0;
+    } else if (cfg::PRINT_BNO_DATA) {
+      collectBnoVector(id);
     }
   }
   if (gotData) updateMagAccuracy();
+  if (cfg::PRINT_BNO_DATA && gotData) publishBnoSample();
   serviceImuCalibration(now);
 
   // Vigilante: begin() solo confirma que el sensor contesta por I2C, no que esté enviando
@@ -455,6 +544,7 @@ void imuPoll() {
     snprintf(msg, sizeof(msg), "imu_sin_datos: reiniciando I2C y sensor (intento %lu)",
              static_cast<unsigned long>(++imuRestartCount));
     note(msg);
+    if (cfg::PRINT_BNO_DATA) resetBnoCapture();
     imuReady = false;
   }
 }
@@ -879,6 +969,10 @@ void motionTask(void *) {
     state.fault = ctl.fault;
     if (ctl.azLimit.tripped())
       state.fault = ctl.azLimit.canBackOff() ? FaultAzLimit : FaultAzLimitBlocked;
+    const bool hasTarget = ctl.mode != Mode::Idle && !state.calibrating && !magCalActive &&
+                           state.fault == FaultNone;
+    state.targetAz = hasTarget ? ctl.tgt[AZ] : NAN;
+    state.targetEl = hasTarget ? ctl.tgt[EL] : NAN;
     if (ctl.fault != FaultNone) {
       state.faultExpectedDeg = static_cast<float>(ctl.evalExpected[ctl.faultAxis]);
       state.faultMeasuredDeg = static_cast<float>(ctl.evalActual[ctl.faultAxis]);
@@ -964,17 +1058,21 @@ void reportBattery() {
 // Emite una muestra nueva con el formato de capturar_bno.py.
 void reportBno() {
   static uint32_t lastSampleId = 0;
-  const Pose pose = poseSnapshot();
-  if (!poseFresh(pose, millis()) || pose.sampleId == lastSampleId) return;
-
-  char message[128];
+  const BnoSample s = bnoSnapshot();
+  if (!s.valid || s.id == lastSampleId || millis() - s.ms > cfg::IMU_TIMEOUT_MS) return;
+  const auto &a = s.vectors[Accel];
+  const auto &g = s.vectors[Gyro];
+  const auto &m = s.vectors[Mag];
+  char message[256];
   const int length = snprintf(
-      message, sizeof(message), "BNO,%lu,%lu,%.7f,%.7f,%.7f,%.7f,%u,%.5f,%.5f,%.5f\n",
-      static_cast<unsigned long>(pose.ms), static_cast<unsigned long>(pose.sampleId),
-      pose.q[0], pose.q[1], pose.q[2], pose.q[3], static_cast<unsigned int>(pose.fusionAcc),
-      pose.accuracyDeg, pose.rawAz, pose.rawEl);
+      message, sizeof(message), "BNO,%lu,%lu,%.5f,%.5f,%.5f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,"
+      "%u,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+      static_cast<unsigned long>(s.ms), static_cast<unsigned long>(s.id),
+      a[0], a[1], a[2], g[0], g[1], g[2], m[0], m[1], m[2],
+      static_cast<unsigned int>(s.fusionAcc), s.accuracyDeg, s.rawAz, s.rawEl,
+      s.targetAz, s.targetEl);
   if (length > 0 && length < static_cast<int>(sizeof(message)) && sendLine(message, length))
-    lastSampleId = pose.sampleId;
+    lastSampleId = s.id;
 }
 
 // Si el movimiento se declaró en falla, avisa una vez por la interfaz.
@@ -1286,6 +1384,7 @@ void pollUart() {
 
 // ── Arduino ──────────────────────────────────────────────────────────────────
 void setup() {
+  if (cfg::PRINT_BNO_DATA) controlUart.setTxBufferSize(512);
   Serial.begin(cfg::UART_BAUD);
   if (cfg::UART_USE_SERIAL2)
     Serial2.begin(cfg::UART_BAUD, SERIAL_8N1, cfg::UART2_RX_PIN, cfg::UART2_TX_PIN);
