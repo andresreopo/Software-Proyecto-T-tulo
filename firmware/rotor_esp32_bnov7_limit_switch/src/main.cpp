@@ -125,7 +125,7 @@ constexpr AxisConfig AXES[2] = {
 };
 
 // ── Comunicación entre tareas ────────────────────────────────────────────────
-enum class CommandType : uint8_t { Target, Track, Stop, CalAxes };
+enum class CommandType : uint8_t { Target, Track, Stop, CalAxes, HomeEl };
 
 // Orden que loop() entrega a motionTask().
 struct MotionCommand {
@@ -152,12 +152,16 @@ enum Fault : uint8_t { FaultNone, FaultAz, FaultEl, FaultAzLimit, FaultAzLimitBl
 constexpr const char *AZ_LIMIT_ERROR = "fault_az_limit";
 
 bool azLimitPressed() { return digitalRead(cfg::AZ_LIMIT_PIN) == LOW; }
+bool elMinPressed() { return digitalRead(cfg::EL_LIMIT_MIN_PIN) == (cfg::EL_LIMIT_ACTIVE_LOW ? LOW : HIGH); }
+bool elMaxPressed() { return digitalRead(cfg::EL_LIMIT_MAX_PIN) == (cfg::EL_LIMIT_ACTIVE_LOW ? LOW : HIGH); }
 bool isAzLimitFault(Fault fault) { return fault == FaultAzLimit || fault == FaultAzLimitBlocked; }
 
 // Estado que motionTask() publica para loop().
 struct MotionState {
   bool moving = false;
-  bool calibrating = false;      // CALAX en curso
+  bool calibrating = false;
+  bool elHomed = false;
+  double elPosition = 0;
   uint32_t activeCommandId = 0;  // última orden ya procesada por motionTask
   Fault fault = FaultNone;
   uint32_t azLimitTrips = 0;
@@ -508,6 +512,10 @@ struct CalRun {
 struct Controller {
   CalRun cal;
   RotorAzLimit azLimit;
+  bool elHoming = false;
+  bool elHomed = false;
+  double elPosition = 0.0;
+  uint32_t elMinChangedMs = 0, elMaxChangedMs = 0;
   Mode mode = Mode::Idle;
   double tgt[2] = {0, 0};   // objetivo (°)
   double ff[2] = {0, 0};    // velocidad del objetivo (°/s), solo en Track
@@ -570,12 +578,15 @@ StepResult emitSteps(Controller &c, int axis, double dt, bool backingOff = false
   const AxisConfig &a = AXES[axis];
   digitalWrite(a.dirPin, ((dir > 0) != a.invertDir) ? HIGH : LOW);
   delayMicroseconds(2);  // tiempo de establecimiento de DIR antes del pulso
-  // Solo el retroceso de azimut puede emitir pasos mientras el contacto está en LOW.
-  if (azLimitPressed() != backingOff) return StepResult::SwitchChanged;
+  // Interbloqueos independientes: nunca avanzar hacia un final de carrera activo.
+  if (axis == AZ && (azLimitPressed() != backingOff)) return StepResult::SwitchChanged;
+  if (axis == EL && ((dir < 0 && elMinPressed()) || (dir > 0 && elMaxPressed())))
+    return StepResult::SwitchChanged;
   digitalWrite(a.stepPin, HIGH);
   delayMicroseconds(cfg::STEP_PULSE_US);
   digitalWrite(a.stepPin, LOW);
   c.emitted[axis] += dir;
+  if (axis == EL && c.elHomed && !c.elHoming) c.elPosition += dir / a.stepsPerDeg;
   if (axis == AZ && !backingOff) {
     c.lastAzDir = dir;
     c.lastAzStepMs = millis();
@@ -757,24 +768,50 @@ void controlStep(Controller &c, uint32_t nowUs) {
   // Tomar la hora después de copiar la muestra evita una edad negativa sin signo.
   const uint32_t nowMs = millis();
   const bool fresh = poseFresh(pose, nowMs);
-  const double meas[2] = {pose.az, pose.el};
+  const double meas[2] = {pose.az, c.elPosition};
+
+  // Homing de elevación: búsqueda lenta del switch inferior, sin depender del BNO085.
+  if (c.elHoming) {
+    c.cmd[AZ] = 0; c.acc[AZ] = 0;
+    if (elMinPressed()) {
+      c.cmd[EL] = 0; c.acc[EL] = 0;
+      c.elHoming = false; c.elHomed = true;
+      c.elPosition = cfg::EL_LIMIT_MIN_DEG;
+      c.emitted[EL] = 0;
+      note("HOMEEL: limite inferior detectado; elevacion referenciada");
+    } else if (labs(c.emitted[EL]) > static_cast<long>(120.0 * AXES[EL].stepsPerDeg)) {
+      c.cmd[EL] = 0; c.acc[EL] = 0; c.elHoming = false;
+      note("HOMEEL: no se encontro el limite inferior tras 120 deg; revisa cableado del switch (GPIO 32) y sentido (EL_INVERT_DIRECTION)");
+    } else {
+      c.cmd[EL] = cfg::EL_HOME_DIRECTION * cfg::EL_HOME_SPEED;
+      emitSteps(c, EL, dt);
+    }
+    return;
+  }
+  // El límite superior fija el extremo y detiene cualquier intento de seguir subiendo.
+  if (c.elHomed && elMaxPressed() && c.cmd[EL] > 0) {
+    c.cmd[EL] = 0; c.acc[EL] = 0; c.elPosition = cfg::EL_LIMIT_MAX_DEG;
+  }
+  if (c.elHomed && elMinPressed() && c.cmd[EL] < 0) {
+    c.cmd[EL] = 0; c.acc[EL] = 0; c.elPosition = cfg::EL_LIMIT_MIN_DEG;
+  }
 
   if (c.mode == Mode::Track && nowMs - c.trkMs > cfg::TRK_TIMEOUT_MS)
     c.setMode(Mode::Idle);  // dejaron de llegar TRK: frenar y quedarse
-  // Sin medición reciente se frena y se olvida el objetivo: cuando el sensor vuelva
-  // el rotor no debe retomar solo un movimiento viejo; espera una orden nueva.
-  if (!fresh) c.setMode(Mode::Idle);
+  // Si el BNO085 pierde datos, se inhibe solo el azimut. La elevación es independiente
+  // y puede seguir usando su posición por pasos siempre que esté referenciada.
 
   if (c.cal.active && !fresh) abortCal(c, "el sensor dejo de responder");
 
   double desired[2] = {0, 0};  // pasos/s
   if (c.cal.active) {
     calStep(c, pose, nowMs, desired);   // CALAX: movimiento en lazo abierto
-  } else if (fresh && c.fault == FaultNone && c.mode != Mode::Idle) {
+  } else if ((fresh || c.elHomed) && c.fault == FaultNone && c.mode != Mode::Idle) {
     const bool tracking = c.mode == Mode::Track;
     const double age = tracking ? (nowMs - c.trkMs) / 1000.0 : 0.0;
     for (int i = 0; i < 2; ++i) {
       const AxisConfig &a = AXES[i];
+      if ((i == AZ && !fresh) || (i == EL && !c.elHomed)) { desired[i] = 0; continue; }
       const double maxRate = a.maxSpeed / a.stepsPerDeg;
       double ff = c.ff[i];
       const double ref = c.tgt[i] + ff * age;  // objetivo extrapolado (Track)
@@ -805,7 +842,12 @@ void controlStep(Controller &c, uint32_t nowUs) {
   for (int i = 0; i < 2; ++i) {
     c.cmd[i] = ramp(c.cmd[i], static_cast<float>(desired[i]), maxDelta);
     if (emitSteps(c, i, dt) == StepResult::SwitchChanged) {
-      sampleAzLimit(c, true);
+      if (i == AZ) sampleAzLimit(c, true);
+      else {
+        c.cmd[EL] = 0; c.acc[EL] = 0;
+        if (elMinPressed()) c.elPosition = cfg::EL_LIMIT_MIN_DEG;
+        if (elMaxPressed()) c.elPosition = cfg::EL_LIMIT_MAX_DEG;
+      }
       return;
     }
   }
@@ -818,7 +860,7 @@ void controlStep(Controller &c, uint32_t nowUs) {
     c.winValid[AZ] = c.winValid[EL] = false; c.strikes[AZ] = c.strikes[EL] = 0;
   } else if (c.fault == FaultNone) {
     if (checkAxisFault(c, AZ, meas[AZ], azOk, nowMs)) c.fault = FaultAz;
-    else if (checkAxisFault(c, EL, meas[EL], fresh, nowMs)) c.fault = FaultEl;
+    /* Elevación: posición por pasos referenciada con HOMEEL; no comparar con quaternion. */
     if (c.fault != FaultNone) {  // frenado inmediato; STOP la borra
       c.faultAxis = c.fault == FaultAz ? AZ : EL;
       c.setMode(Mode::Idle);
@@ -860,8 +902,21 @@ void motionTask(void *) {
           ctl.ff[AZ] = cmd.vaz;  ctl.ff[EL] = cmd.vel;
           ctl.trkMs = cmd.timeMs;
           break;
+        case CommandType::HomeEl:
+          if (!ctl.cal.active) {
+            ctl.setMode(Mode::Idle);
+            ctl.elHomed = false;
+            ctl.elHoming = true;
+            ctl.emitted[EL] = 0;
+            ctl.cmd[EL] = 0; ctl.acc[EL] = 0;
+            ctl.winValid[EL] = false; ctl.strikes[EL] = 0;
+            note("HOMEEL: buscando limite inferior; mantén despejada la trayectoria");
+          }
+          break;
         case CommandType::Stop:
           if (ctl.cal.active) abortCal(ctl, "interrumpida por STOP");
+          ctl.elHoming = false;     // STOP también cancela la búsqueda de elevación
+          ctl.cmd[EL] = 0; ctl.acc[EL] = 0;
           ctl.setMode(Mode::Idle);  // frena con la rampa
           ctl.fault = FaultNone;  // STOP borra la falla
           ctl.winValid[AZ] = ctl.winValid[EL] = false; ctl.strikes[AZ] = ctl.strikes[EL] = 0;
@@ -873,6 +928,9 @@ void motionTask(void *) {
     controlStep(ctl, micros());
     state.moving = ctl.cmd[AZ] != 0 || ctl.cmd[EL] != 0;
     state.calibrating = ctl.cal.active;
+    state.elHomed = ctl.elHomed;
+    state.elPosition = ctl.elPosition;
+    state.moving = state.moving || ctl.elHoming;
     state.azLimitTrips = ctl.azLimit.trips();
     state.fault = ctl.fault;
     if (ctl.azLimit.tripped())
@@ -940,12 +998,25 @@ void sendLine(const char *message, int length) {
 // así la interfaz ve la posición como obsoleta en vez de creer un dato viejo.
 void reportPosition() {
   const Pose pose = poseSnapshot();
-  if (!poseFresh(pose, millis())) return;
+  const MotionState st = motionSnapshot();
+  if (!poseFresh(pose, millis()) || !st.elHomed) {
+    static uint32_t lastWhyMs = 0;
+    if (millis() - lastWhyMs >= 5000) {
+      lastWhyMs = millis();
+      char why[96];
+      snprintf(why, sizeof(why), "sin POS: imu=%s el_homed=%s az_limit=%s el_min=%s el_max=%s",
+               poseFresh(pose, millis()) ? "ok" : "SIN_DATOS", st.elHomed ? "si" : "NO (envia HOMEEL)",
+               azLimitPressed() ? "ACTIVO" : "libre", elMinPressed() ? "ACTIVO" : "libre",
+               elMaxPressed() ? "ACTIVO" : "libre");
+      note(why);
+    }
+    return;
+  }
   char message[72];
   const int length = cfg::POS_INCLUDE_ACCURACY
-      ? snprintf(message, sizeof(message), "POS,%.2f,%.2f,%u,%.1f,%u\n", pose.az, pose.el,
+      ? snprintf(message, sizeof(message), "POS,%.2f,%.2f,%u,%.1f,%u\n", pose.az, st.elPosition,
                  pose.fusionAcc, pose.accuracyDeg, pose.magAcc)
-      : snprintf(message, sizeof(message), "POS,%.2f,%.2f\n", pose.az, pose.el);
+      : snprintf(message, sizeof(message), "POS,%.2f,%.2f\n", pose.az, st.elPosition);
   if (length > 0 && length < static_cast<int>(sizeof(message))) sendLine(message, length);
 }
 
@@ -1076,6 +1147,7 @@ bool motionAllowed() {
   if (isAzLimitFault(st.fault) || azLimitPressed()) { uartError(AZ_LIMIT_ERROR); return false; }
   if (st.calibrating || magCalActive) { uartError("busy"); return false; }
   if (st.fault != FaultNone) { uartError("fault"); return false; }
+  if (!st.elHomed) { uartError("el_not_homed"); return false; }
   if (!poseFresh(poseSnapshot())) { uartError("no_imu"); return false; }
   return true;
 }
@@ -1119,10 +1191,18 @@ void handleCommand(char *line) {
       else if (motionAllowed())
         queueCommand(CommandType::Track, RotorMath::normalizeAzimuth(v[0]), v[1], v[2], v[3]);
     }
+  } else if (strcmp(text, "HOMEEL") == 0) {
+    const MotionState st = motionSnapshot();
+    if (isAzLimitFault(st.fault) || azLimitPressed()) uartError(AZ_LIMIT_ERROR);  // motionTask lo descartaría
+    else if (st.moving || st.calibrating) uartError("busy");
+    else if (queueCommand(CommandType::HomeEl, 0, 0)) controlUart.println("ACK");
+    else uartError("queue_full");
   } else if (strcmp(text, "STOP") == 0) {
     if (queueCommand(CommandType::Stop, 0, 0)) controlUart.println("ACK");
     else uartError("queue_full");
   } else if (strncmp(text, "CAL,", 4) == 0 || strcmp(text, "ZERO") == 0) {
+    uartError("cal_disabled_step_elevation");
+    return;
     double v[2] = {0, 0};  // ZERO = CAL,0,0
     const bool isCal = text[0] == 'C';
     if (isCal && !RotorMath::parseList(text + 4, v, 2)) {
@@ -1138,6 +1218,8 @@ void handleCommand(char *line) {
       uartError("no_imu");
     }
   } else if (strcmp(text, "CALAX") == 0) {
+    uartError("calax_disabled_step_elevation");
+    return;
     const MotionState st = motionSnapshot();
     if (isAzLimitFault(st.fault) || azLimitPressed()) uartError(AZ_LIMIT_ERROR);
     else if (!poseFresh(poseSnapshot())) uartError("no_imu");
@@ -1215,7 +1297,7 @@ void handleCommand(char *line) {
              accLabel(p.magAcc), p.accuracyDeg);
     note(msg);
   } else if (strcmp(text, "HELP") == 0) {
-    note("SET,<az>,<el> | TRK,<az>,<el>,<vaz>,<vel> | CAL,<az>,<el> | ZERO | CALAX | BORE,<x>,<y>,<z> | MAGCAL | SAVECAL | ENDCAL | ACC | GET | STOP | IMU | HELP");
+    note("SET,<az>,<el> | TRK,<az>,<el>,<vaz>,<vel> | CAL,<az>,<el> | ZERO | CALAX | BORE,<x>,<y>,<z> | MAGCAL | SAVECAL | ENDCAL | ACC | GET | HOMEEL | STOP | IMU | HELP");
   } else {
     uartError("unknown_command");
   }
@@ -1277,6 +1359,8 @@ void setup() {
     digitalWrite(a.stepPin, LOW);
   }
   pinMode(cfg::AZ_LIMIT_PIN, INPUT_PULLUP);
+  pinMode(cfg::EL_LIMIT_MIN_PIN, cfg::EL_LIMIT_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+  pinMode(cfg::EL_LIMIT_MAX_PIN, cfg::EL_LIMIT_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
   analogReadResolution(12);
   analogSetPinAttenuation(cfg::BAT_PIN, ADC_11db);  // rango del pin ~0-3.3 V
 
@@ -1306,7 +1390,8 @@ void setup() {
     note("FATAL: no se pudieron iniciar las tareas; no se aceptan comandos");
     for (;;) delay(1000);
   }
-  note("Rotor listo (lazo cerrado con BNO085); esperando al sensor");
+  note("Rotor listo: azimut con BNO085; elevacion por pasos y finales de carrera. Ejecuta HOMEEL antes de mover.");
+  note("CALAX deshabilitado: la elevacion ya no se calibra con quaternion; ajusta EL_STEPS_PER_DEG y angulos de switches.");
   if (!boresightCalibrated)
     note("AVISO: eje de la antena sin calibrar. Un sensor mal alineado acopla azimut y elevacion y puede dar ERR,fault_*; ejecuta CALAX antes de mover en lazo cerrado");
 }

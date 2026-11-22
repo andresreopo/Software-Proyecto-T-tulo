@@ -14,7 +14,22 @@ constexpr uint8_t AZ_DIR_PIN  = 23;
 constexpr uint8_t AZ_STEP_PIN = 22;
 constexpr uint8_t EL_DIR_PIN  = 21;
 constexpr uint8_t EL_STEP_PIN = 19;
-constexpr uint8_t AZ_LIMIT_PIN = 32;          // INPUT_PULLUP, LOW = final de carrera activo
+constexpr uint8_t AZ_LIMIT_PIN = 27;          // INPUT_PULLUP, LOW = final de carrera activo
+
+// Finales de carrera de elevación. Contacto normalmente abierto entre GPIO y GND.
+// Cambia estos valores cuando confirmes el cableado real.
+constexpr uint8_t EL_LIMIT_MIN_PIN = 13;
+constexpr uint8_t EL_LIMIT_MAX_PIN = 14;
+constexpr bool EL_LIMIT_ACTIVE_LOW = true;
+// Ángulo mecánico correspondiente al punto de actuación de cada interruptor.
+// No tienen por qué ser 0° y 90°: ajusta estos valores tras medir el montaje.
+constexpr double EL_LIMIT_MIN_DEG = 0.0;
+constexpr double EL_LIMIT_MAX_DEG = 90.0;
+// Sentido lógico de búsqueda del interruptor inferior. Mantén -1 para que
+// los pasos positivos representen elevación creciente; si HOMEEL sube, invierte
+// EL_INVERT_DIRECTION según el sentido mecánico del motor.
+constexpr int8_t EL_HOME_DIRECTION = -1;
+constexpr float EL_HOME_SPEED = 100.0f;       // micropasos/s, búsqueda lenta
 constexpr uint32_t AZ_LIMIT_RELEASE_MS = 30;  // HIGH estable antes del STOP automático
 constexpr uint32_t AZ_LIMIT_APPROACH_MS = 250;  // antigüedad máxima del último paso al detectar LOW
 constexpr double AZ_LIMIT_BACKOFF_MAX_DEG = 3.0;
@@ -56,8 +71,8 @@ constexpr float EL_MAX_SPEED = 400.0f;
 constexpr float RAMP_ACCELERATION = 300.0f;
 
 // Límites de elevación (grados), iguales a rotor_config.py de la interfaz.
-constexpr double EL_MIN_DEG = 0.0;
-constexpr double EL_MAX_DEG = 90.0;
+constexpr double EL_MIN_DEG = EL_LIMIT_MIN_DEG;
+constexpr double EL_MAX_DEG = EL_LIMIT_MAX_DEG;
 
 // true : el azimut toma el camino más corto cruzando el norte (mecanismo giro libre).
 // false: recorrido acotado 0..360° absolutos, sin cruzar el norte.
@@ -145,7 +160,7 @@ constexpr uint32_t CAL_SETTLE_MS = 1500;        // espera tras cada tramo para q
 // ───────────────────────── Lazo de control ─────────────────────────
 // SET : va a la posición y la mantiene (corrigiendo si el sensor ve que se desvió).
 // TRK : velocidad = vsat + CTRL_KP * error + corrección integral.
-constexpr double CTRL_KP = 2.0;            // 1/s, ganancia sobre el error de posición
+constexpr double CTRL_KP = 1.5;            // 1/s, ganancia sobre el error de posición
 constexpr double TRK_KI_AZ = 0.8;          // 1/s², 0 desactiva la integral de azimut
 constexpr double TRK_KI_EL = 0.8;          // 1/s², 0 desactiva la integral de elevación
 constexpr double TRK_MAX_INTEGRAL_DEG_S = 1.5;  // °/s, corrección máxima por eje
@@ -208,8 +223,9 @@ static_assert(AZ_MAX_SPEED > 0 && EL_MAX_SPEED > 0 &&
                   AZ_MAX_SPEED <= 1000 && EL_MAX_SPEED <= 1000,
               "La tarea de 1 ms emite como máximo 1 paso/ms (1000 pasos/s)");
 static_assert(RAMP_ACCELERATION > 0, "RAMP_ACCELERATION debe ser positiva");
-static_assert(EL_MIN_DEG <= 0 && EL_MAX_DEG >= 0 && EL_MIN_DEG < EL_MAX_DEG,
-              "Los límites de elevación deben incluir 0");
+static_assert(EL_MIN_DEG < EL_MAX_DEG, "El límite inferior debe ser menor al superior");
+static_assert(EL_HOME_DIRECTION == -1, "EL_HOME_DIRECTION debe ser -1: pasos positivos aumentan elevacion");
+static_assert(EL_HOME_SPEED > 0 && EL_HOME_SPEED <= EL_MAX_SPEED, "EL_HOME_SPEED inválida");
 static_assert(BORESIGHT_X != 0 || BORESIGHT_Y != 0 || BORESIGHT_Z != 0,
               "El eje de la antena (BORESIGHT) no puede ser nulo");
 static_assert(!(AZ_ABSOLUTE_MAGNETIC && IMU_USE_GAME_ROTATION),

@@ -56,6 +56,9 @@ V5:
 - Se añade un mapa para visualización de satélite y observador respecto al espacio aéreo chileno.
 
 # FIRMWARE
+V8:
+- Limit switch elevación añadido
+
 V7:
 - Limit switch azimutal añadido
 
