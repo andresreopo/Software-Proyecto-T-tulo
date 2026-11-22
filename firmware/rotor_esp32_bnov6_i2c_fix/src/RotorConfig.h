@@ -112,7 +112,7 @@ constexpr bool IMU_USE_GAME_ROTATION = false;
 // X coincide con la bisagra de elevacion, por eso no sirve como boresight.
 // (Si cambias el montaje o ya corriste CALAX con otro valor, usa BORE,x,y,z por UART.)
 constexpr double BORESIGHT_X = 0.0;
-constexpr double BORESIGHT_Y = 1.0;
+constexpr double BORESIGHT_Y = -1.0;
 constexpr double BORESIGHT_Z = 0.0;
 
 // Referencia del azimut.
@@ -131,7 +131,7 @@ constexpr bool AZ_ABSOLUTE_MAGNETIC = true;
 // Valor del lugar de uso: 0.08 deg E (+-0.37 deg), variando 0.18 deg W por año (NOAA/NCEI).
 // La deriva anual es menor que la incertidumbre del modelo: no hace falta actualizarlo.
 constexpr double MAG_DECLINATION_DEG = 0.08;
-constexpr double EL_OFFSET = -82;
+constexpr double EL_OFFSET = 0;
 
 // ───────────────────────── Calibración de ejes (comando CALAX) ─────────────────────────
 // CALAX mueve cada eje ±CAL_SWEEP_DEG con los motores (lazo abierto, despejar el rotor) y mide

@@ -1,5 +1,11 @@
 # Comentarios de versión
 # SATTRACK
+v17:
+- Se agregan botones para envío de comandos
+
+V16:
+- Cambios de distribución visual en interfaz
+
 V15:
 - Puerto GPS actualizado
 - IP de inicio de interfaz actualizada, permite conexión local a través de otro computador

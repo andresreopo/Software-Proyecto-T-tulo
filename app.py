@@ -150,7 +150,12 @@ def gps_state():
 
 @app.post("/api/catalog/refresh")
 def refresh():
-    started = store.refresh_async()
+    """Actualiza TLE (CelesTrak) y transmisores (SatNOGS) por separado: {"source": "tle" | "tx" | "all"}."""
+    body = request.get_json(silent=True) or {}
+    source = str(body.get("source") or "all")
+    if source not in ("tle", "tx", "all"):
+        return error("source debe ser tle, tx o all.")
+    started = store.refresh_async(("tle", "tx") if source == "all" else (source,))
     return jsonify({"ok": True, "started": started, "catalog": store.status()})
 
 
@@ -203,7 +208,8 @@ def start_session():
     try:
         norad_id = int(body.get("norad_id"))
         observer = observer_from(body)
-        speed = int(body.get("speed", 1))
+        realtime = bool(body.get("realtime"))
+        speed = 1 if realtime else int(body.get("speed", 1))
         if speed not in (1, 5, 10, 20):
             raise ValueError("Velocidad permitida: 1, 5, 10 o 20")
         record = store.record(norad_id)
@@ -228,7 +234,7 @@ def start_session():
             transmitter = {**transmitter, "source": "SatNOGS DB"}
         azimuth = azimuth_filter(body)
         session = SimulationSession(record, observer, transmitter, speed, azimuth=azimuth,
-                                    hours=hour_filter(body) if azimuth else None)
+                                    hours=hour_filter(body) if azimuth else None, realtime=realtime)
         follower.stop(hold=True)                       # una sesión nueva reemplaza al seguimiento anterior
         sessions.add(session)
         follow_error = None

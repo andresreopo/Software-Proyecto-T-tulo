@@ -58,6 +58,8 @@ class CatalogStore:
         self.by_id = {}
         self.tx_by_id = {}
         self.updating = False
+        self.updating_sources = set()           # "tle" y/o "tx" en curso
+        self.source_errors = {}                 # último error por fuente
         self.last_error = None
         self._reindex()
 
@@ -91,6 +93,7 @@ class CatalogStore:
                 "satnogs": {**self.tx_meta, "age_hours": round(tx_age, 1) if tx_age is not None else None,
                             "stale": tx_age is None or tx_age > 24},
                 "updating": self.updating,
+                "updating_sources": sorted(self.updating_sources),
                 "last_error": self.last_error,
             }
 
@@ -214,56 +217,73 @@ class CatalogStore:
         return {"items": items[begin:begin + page_size], "total": len(items),
                 "page": page, "page_size": page_size, "computed_at": computed_at}
 
-    def refresh_async(self):
-        with self.lock:
-            if self.updating:
-                return False
-            self.updating = True
-            self.last_error = None
-        threading.Thread(target=self._refresh, daemon=True, name="catalog-refresh").start()
-        return True
+    def refresh_async(self, sources=("tle", "tx")):
+        """Actualiza en segundo plano las fuentes pedidas: "tle" (CelesTrak) y/o "tx" (transmisores SatNOGS),
+        cada una por separado. Devuelve las que arrancaron (las que ya se estaban actualizando se omiten)."""
+        started = []
+        for source in sources:
+            if source not in ("tle", "tx"):
+                raise ValueError("Fuente desconocida: usa tle o tx.")
+            with self.lock:
+                if source in self.updating_sources:
+                    continue
+                self.updating_sources.add(source)
+                self.updating = True
+                self.source_errors.pop(source, None)
+                self.last_error = "; ".join(self.source_errors.values()) or None
+            target = self._refresh_tle if source == "tle" else self._refresh_tx
+            threading.Thread(target=self._run_refresh, args=(source, target), daemon=True,
+                             name=f"catalog-refresh-{source}").start()
+            started.append(source)
+        return started
 
-    def _refresh(self):
-        errors = []
+    def _run_refresh(self, source, target):
+        error = None
         try:
-            response = requests.get(CELESTRAK, params={"GROUP": "ACTIVE", "FORMAT": "JSON"},
-                                    headers=HEADERS, timeout=(6, 40))
-            response.raise_for_status()
-            records = response.json()
-            if not isinstance(records, list) or len(records) < 1000:
-                raise ValueError("Respuesta orbital incompleta")
-            valid = [r for r in records if isinstance(r, dict) and r.get("NORAD_CAT_ID")
-                     and r.get("EPOCH") and r.get("MEAN_MOTION")]
-            meta = {"fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "source": CELESTRAK + "?GROUP=ACTIVE&FORMAT=JSON", "count": len(valid)}
-            _write("active.json", valid)
-            _write("active.meta.json", meta)
-            with self.lock:
-                self.records = valid
-                self.orbit_meta = meta
-                self._reindex()
+            target()
         except (requests.RequestException, ValueError, OSError) as exc:
-            errors.append(f"CelesTrak: {exc}")
-        try:
-            response = requests.get(SATNOGS, params={"status": "active"},
-                                    headers=HEADERS, timeout=(6, 35))
-            response.raise_for_status()
-            records = response.json()
-            if not isinstance(records, list) or not records:
-                raise ValueError("Respuesta de transmisores vacía")
-            meta = {"fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "source": SATNOGS, "count": len(records)}
-            _write("transmitters.json", records)
-            _write("transmitters.meta.json", meta)
+            error = f"{'CelesTrak' if source == 'tle' else 'SatNOGS'}: {exc}"
+        finally:
             with self.lock:
-                self.transmitters = records
-                self.tx_meta = meta
-                self._reindex()
-        except (requests.RequestException, ValueError, OSError) as exc:
-            errors.append(f"SatNOGS: {exc}")
+                self.updating_sources.discard(source)
+                self.updating = bool(self.updating_sources)
+                if error:
+                    self.source_errors[source] = error
+                self.last_error = "; ".join(self.source_errors.values()) or None
+
+    def _refresh_tle(self):
+        response = requests.get(CELESTRAK, params={"GROUP": "ACTIVE", "FORMAT": "JSON"},
+                                headers=HEADERS, timeout=(6, 40))
+        response.raise_for_status()
+        records = response.json()
+        if not isinstance(records, list) or len(records) < 1000:
+            raise ValueError("Respuesta orbital incompleta")
+        valid = [r for r in records if isinstance(r, dict) and r.get("NORAD_CAT_ID")
+                 and r.get("EPOCH") and r.get("MEAN_MOTION")]
+        meta = {"fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source": CELESTRAK + "?GROUP=ACTIVE&FORMAT=JSON", "count": len(valid)}
+        _write("active.json", valid)
+        _write("active.meta.json", meta)
         with self.lock:
-            self.updating = False
-            self.last_error = "; ".join(errors) if errors else None
+            self.records = valid
+            self.orbit_meta = meta
+            self._reindex()
+
+    def _refresh_tx(self):
+        response = requests.get(SATNOGS, params={"status": "active"},
+                                headers=HEADERS, timeout=(6, 35))
+        response.raise_for_status()
+        records = response.json()
+        if not isinstance(records, list) or not records:
+            raise ValueError("Respuesta de transmisores vacía")
+        meta = {"fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source": SATNOGS, "count": len(records)}
+        _write("transmitters.json", records)
+        _write("transmitters.meta.json", meta)
+        with self.lock:
+            self.transmitters = records
+            self.tx_meta = meta
+            self._reindex()
 
 
 store = CatalogStore()

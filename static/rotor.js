@@ -76,6 +76,7 @@ function updateUI() {
     ? (rotor.sim ? "Simulador activo." : "Conectado a " + rotor.port + " · " + rotor.baud + " baud.")
       + (rotor.az === null ? " Esperando POS de la ESP32…" : stale ? " Sin datos de la ESP32 (posición obsoleta)." : "")
     : (rotor.error ? "Error: " + rotor.error : "Desconectado.");
+  syncCommands(live);
   renderFollow();
 }
 
@@ -263,6 +264,92 @@ async function enableFollow() {
   catch (e) { toast(e.message); conLine("sys", "Error: " + e.message); }
 }
 window.rotorAutoFollow = () => rotor.connected;
+
+// ── Comandos por botones y sliders (equivalen a escribirlos en la consola) ──────
+const cmdButtons = Array.from(document.querySelectorAll(".cmd-panel button"));
+const decimals = step => { const t = String(step), i = t.indexOf("."); return i < 0 ? 0 : t.length - i - 1; };
+const cmdSliders = Array.from(document.querySelectorAll(".cmd-slider input[type=range]"));
+let setTouched = false, cmdBusy = false;
+function showSlider(input) {
+  const out = q(input.id + "-v"), unit = out.dataset.unit || "";
+  out.textContent = Number(input.value).toLocaleString("es-CL", {minimumFractionDigits: decimals(input.step), maximumFractionDigits: decimals(input.step)}) + unit;
+}
+cmdSliders.forEach(inp => {
+  showSlider(inp);
+  inp.addEventListener("input", () => { showSlider(inp); if (inp.id.startsWith("cmd-set-")) setTouched = true; });
+});
+const num = id => Number(q(id).value);
+const f2 = n => n.toFixed(2);
+// Texto del comando de cada botón con parámetros (mismos formatos que valida el firmware)
+const builders = {
+  set:  () => `SET,${f2(num("cmd-set-az"))},${f2(num("cmd-set-el"))}`,
+  cal:  () => `CAL,${f2(num("cmd-cal-az"))},${f2(num("cmd-cal-el"))}`,
+  bore: () => {
+    const v = ["x", "y", "z"].map(a => num("cmd-bore-" + a));
+    if (!v.some(x => Math.abs(x) > 1e-6)) throw new Error("BORE: el vector no puede ser (0,0,0).");
+    return `BORE,${v.map(x => x.toFixed(3)).join(",")}`;
+  },
+};
+const CONFIRM = {CALAX: "CALAX moverá el rotor ±grados durante ~30 s. ¿Iniciar la calibración de ejes?",
+                 BORE: "BORE reemplaza la dirección “adelante” guardada y pone el offset de elevación a 0. ¿Enviar?"};
+async function sendCommand(text, key) {
+  if (cmdBusy) return;
+  if (!rotor.connected) { toast("Conecta el tracker para enviar comandos."); return; }
+  if (CONFIRM[key] && !confirm(CONFIRM[key])) return;
+  cmdBusy = true; syncCommands();
+  try { await call("/api/serial/send", {text}); }
+  catch (err) { toast(err.message); conLine("sys", "Error: " + err.message); }
+  finally { cmdBusy = false; syncCommands(); }
+}
+document.querySelector(".cmd-panel").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b || b.disabled) return;
+  try {
+    if (b.dataset.cmd) sendCommand(b.dataset.cmd, b.dataset.cmd);
+    else if (b.dataset.send) sendCommand(builders[b.dataset.send](), b.dataset.send.toUpperCase());
+  } catch (err) { toast(err.message); }
+});
+// Habilita/deshabilita los controles y, mientras no se toquen, deja los sliders de SET en la posición real.
+function syncCommands(live) {
+  const on = rotor.connected && !cmdBusy;
+  cmdButtons.forEach(b => { b.disabled = !on; });
+  q("cmd-state").textContent = rotor.connected ? "Equivalen a escribirlos en la consola." : "Conecta el tracker para enviar.";
+  if (live && !setTouched && document.activeElement !== q("cmd-set-az") && document.activeElement !== q("cmd-set-el")) {
+    q("cmd-set-az").value = Math.round(rotor.az * 2) / 2; q("cmd-set-el").value = Math.round(rotor.el * 2) / 2;
+    showSlider(q("cmd-set-az")); showSlider(q("cmd-set-el"));
+  }
+}
+
+// ── Ventana flotante de la pestaña RF: arrastrable y minimizable ────────────────
+(() => {
+  const win = q("rf-mini"), bar = q("rf-mini-bar"), btn = q("rf-mini-toggle");
+  const KEY = "sattrack.rfmini";
+  let st = {min: false, x: null, y: null};
+  try { st = {...st, ...JSON.parse(localStorage.getItem(KEY) || "{}")}; } catch (_) {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (_) {} };
+  const clamp = () => {
+    if (st.x === null) return;
+    const r = win.getBoundingClientRect();
+    st.x = Math.max(0, Math.min(innerWidth - r.width, st.x)); st.y = Math.max(0, Math.min(innerHeight - r.height, st.y));
+    win.style.left = st.x + "px"; win.style.top = st.y + "px"; win.style.right = win.style.bottom = "auto";
+  };
+  const apply = () => {
+    win.classList.toggle("min", st.min); btn.textContent = st.min ? "+" : "–";
+    btn.setAttribute("aria-expanded", String(!st.min)); btn.setAttribute("aria-label", st.min ? "Expandir" : "Minimizar");
+    clamp();
+  };
+  btn.addEventListener("click", () => { st.min = !st.min; save(); apply(); });
+  bar.addEventListener("pointerdown", e => {
+    if (e.target.closest("button")) return;
+    const r = win.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+    bar.setPointerCapture(e.pointerId);
+    const move = ev => { st.x = ev.clientX - dx; st.y = ev.clientY - dy; clamp(); };
+    const up = () => { bar.removeEventListener("pointermove", move); bar.removeEventListener("pointerup", up); bar.removeEventListener("pointercancel", up); save(); };
+    bar.addEventListener("pointermove", move); bar.addEventListener("pointerup", up); bar.addEventListener("pointercancel", up);
+    e.preventDefault();
+  });
+  addEventListener("resize", clamp);
+  apply();
+})();
 
 loadPorts(); connectWs(); schedule();
 })();
