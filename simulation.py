@@ -27,8 +27,11 @@ def _move(current, target, limit):
 
 
 class SimulationSession:
-    def __init__(self, record, observer, transmitter, speed=10, azimuth=None, hours=None):
+    def __init__(self, record, observer, transmitter, speed=1, azimuth=None, hours=None, realtime=False):
         self.id = uuid.uuid4().hex
+        self.realtime = bool(realtime)             # True: el reloj de la sesión ES la hora real (1×, sin pausa)
+        if self.realtime:
+            speed = 1
         self.record = record
         self.observer = dict(observer)
         self.transmitter = dict(transmitter)
@@ -45,7 +48,7 @@ class SimulationSession:
         self.pass_info = self.passes[0]
         now = dt.datetime.now(UTC)
         aos = dt.datetime.fromisoformat(self.pass_info["aos_utc"])
-        self.sim_anchor = now if self.pass_info.get("in_progress") else aos - dt.timedelta(seconds=20)
+        self.sim_anchor = now if (self.realtime or self.pass_info.get("in_progress")) else aos - dt.timedelta(seconds=20)
         self.wall_anchor = self.created_wall
         self.paused = False
         self.stopped = False
@@ -66,6 +69,8 @@ class SimulationSession:
             return self._sim_time(time.monotonic()), self.speed, self.paused, self.stopped
 
     def control(self, action, speed=None):
+        if self.realtime and action in ("pause", "resume", "speed"):
+            raise ValueError("En modo tiempo real no se puede pausar ni cambiar la velocidad.")
         with self.lock:
             wall = time.monotonic()
             now_sim = self._sim_time(wall)
@@ -170,6 +175,7 @@ class SimulationSession:
                 "sim_time_utc": sim_time.isoformat(),
                 "sim_time_chile": sim_time.astimezone(CHILE).isoformat(timespec="seconds"),
                 "speed": self.speed,
+                "realtime": self.realtime,
                 "phase": phase,
                 "progress": round(progress, 3),
                 "pass": self.pass_info,

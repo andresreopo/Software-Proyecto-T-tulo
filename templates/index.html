@@ -1,3 +1,25 @@
+{% macro rotor_lead(prefix) -%}
+<form id="{{ prefix }}-lead-form" class="rot-lead-form" autocomplete="off">
+  <div class="rot-lead-header">
+    <label class="rotor-field" for="{{ prefix }}-lead">Adelanto del tracker (s)</label>
+    <output id="{{ prefix }}-lead-value" for="{{ prefix }}-lead">{{ rotor_lead_seconds|string|replace('.', ',') }} s</output>
+  </div>
+  <div class="rot-lead-controls">
+    <span aria-hidden="true">0 s</span>
+    <input id="{{ prefix }}-lead" name="lead_seconds" type="range" min="0"
+           max="{{ rotor_lead_max }}" step="1" value="{{ rotor_lead_seconds }}">
+    <span aria-hidden="true">{{ rotor_lead_max }} s</span>
+    <button type="submit" class="button secondary" id="{{ prefix }}-lead-apply">Aplicar</button>
+  </div>
+  <p id="{{ prefix }}-lead-status" role="status" class="rotor-hint rot-lead-status"></p>
+</form>
+{%- endmacro %}
+{% macro cmd_slider(id, label, min, max, step, value, unit="°") -%}
+<label class="cmd-slider" for="{{ id }}">
+  <span class="cmd-slider-head"><span>{{ label }}</span><output id="{{ id }}-v" for="{{ id }}" data-unit="{{ unit }}">{{ value }}{{ unit }}</output></span>
+  <input id="{{ id }}" type="range" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ value }}">
+</label>
+{%- endmacro %}
 <!doctype html>
 <html lang="es">
 <head>
@@ -83,7 +105,7 @@
           <div class="quick-list" id="quick-list">
             <button data-norad="38011">SSOT</button><button data-norad="60133">GOES 19</button>
           </div>
-          <div class="catalog-summary"><span id="catalog-summary">Cargando objetos…</span><span class="refresh-group"><label for="refresh-sources" class="refresh-text">Actualizar bases</label><button id="refresh-sources" type="button" title="Actualizar CelesTrak y SatNOGS" aria-label="Actualizar bases">↻</button></span></div>
+          <div class="catalog-summary"><span id="catalog-summary">Cargando objetos…</span><span class="refresh-group"><button id="refresh-tle" type="button" class="refresh-btn" title="Actualizar TLE (CelesTrak)" aria-label="Actualizar TLE"><i>↻</i> TLE</button><button id="refresh-tx" type="button" class="refresh-btn" title="Actualizar transmisores (SatNOGS)" aria-label="Actualizar transmisores"><i>↻</i> Transmisores</button></span></div>
           <div id="satellite-list" class="satellite-list" aria-live="polite"></div>
           <div class="pager"><button id="prev-page" class="button ghost">← Anterior</button><span id="page-label">—</span><button id="next-page" class="button ghost">Siguiente →</button></div>
         </section>
@@ -102,7 +124,7 @@
           <div class="selection-controls">
             <label class="frequency-field">Bajada L/S<select id="transmitter" disabled><option>Elige un satélite</option></select></label>
             <label id="manual-wrap" class="manual-field" hidden>Frecuencia manual simulada (MHz)<input id="manual-frequency" type="number" min="1600" max="4000" step="0.001" placeholder="2235.000"></label>
-            <label class="speed-field">Velocidad<select id="speed"><option value="1">1×</option><option value="5">5×</option><option value="10" selected>10×</option><option value="20">20×</option></select></label>
+            <label class="speed-field">Modo<select id="speed"><option value="real" selected>Real</option><option value="1">SIM 1×</option><option value="5">SIM 5×</option><option value="10">SIM 10×</option><option value="20">SIM 20×</option></select></label>
             <button id="start-session" class="button primary" disabled>▶ Iniciar próximo pase</button>
           </div>
           <div class="passes-head"><span>Próximos pases sobre el mínimo</span><small id="passes-horizon">Hora de Chile · próximos 5 días</small></div>
@@ -128,7 +150,7 @@
                 <div class="el-legend" hidden><b id="el-leg-c">—</b><b id="el-leg-t">—</b></div>
               </aside>
             </div>
-            <div class="sim-time-row"><span>SIM</span><strong id="sim-time">—</strong></div>
+            <div class="sim-time-row"><span id="sim-label">SIM</span><strong id="sim-time">—</strong></div>
             <div class="progress-track"><div id="pass-progress"></div></div>
           </section>
           <section class="card link-card">
@@ -146,6 +168,48 @@
               <a class="button secondary" id="bno-download" hidden>Descargar CSV</a>
               <small id="bno-status">Conecta la ESP32 para grabar.</small>
             </div>
+            {{ rotor_lead("rot") }}
+            <section class="cmd-panel" aria-label="Comandos del tracker">
+              <div class="console-head"><span>COMANDOS</span><small id="cmd-state" class="rotor-hint">Conecta el tracker para enviar.</small></div>
+              <div class="cmd-quick">
+                <button type="button" class="button cmd-stop" data-cmd="STOP">■ STOP</button>
+                <button type="button" class="button secondary" data-cmd="ACC" title="Precisión del sensor IMU">ACC · precisión</button>
+                <button type="button" class="button secondary" data-cmd="IMU" title="Diagnóstico del IMU">IMU · diagnóstico</button>
+                <button type="button" class="button ghost" data-cmd="HELP">HELP</button>
+              </div>
+              <details class="cmd-group" open>
+                <summary>SET · mover a una posición</summary>
+                <div class="cmd-body">
+                  {{ cmd_slider("cmd-set-az", "Azimut", 0, 360, 0.5, 180) }}
+                  {{ cmd_slider("cmd-set-el", "Elevación", 0, 90, 0.5, 45) }}
+                  <button type="button" class="button primary full" data-send="set">Enviar SET</button>
+                </div>
+              </details>
+              <details class="cmd-group">
+                <summary>Calibración</summary>
+                <div class="cmd-body">
+                  <p class="rotor-hint">Con el tracker detenido. <b>CAL</b> declara hacia dónde apunta ahora (az/el reales).</p>
+                  {{ cmd_slider("cmd-cal-az", "Azimut real", 0, 360, 0.5, 0) }}
+                  {{ cmd_slider("cmd-cal-el", "Elevación real", -90, 90, 0.5, 0) }}
+                  <button type="button" class="button primary full" data-send="cal">Enviar CAL</button>
+                  <div class="cmd-quick">
+                    <button type="button" class="button secondary" data-cmd="CALAX" title="Calibra ejes (~30 s)">CALAX</button>
+                    <button type="button" class="button secondary" data-cmd="MAGCAL">MAGCAL</button>
+                    <button type="button" class="button secondary" data-cmd="SAVECAL">SAVECAL</button>
+                  </div>
+                </div>
+              </details>
+              <details class="cmd-group">
+                <summary>Avanzado · BORE</summary>
+                <div class="cmd-body">
+                  <p class="rotor-hint"><b>BORE</b> fija la dirección “adelante” de la antena (vector x,y,z en los ejes del sensor; se normaliza).</p>
+                  {{ cmd_slider("cmd-bore-x", "x", -1, 1, 0.001, 1, "") }}
+                  {{ cmd_slider("cmd-bore-y", "y", -1, 1, 0.001, 0, "") }}
+                  {{ cmd_slider("cmd-bore-z", "z", -1, 1, 0.001, 0, "") }}
+                  <button type="button" class="button primary full" data-send="bore">Enviar BORE</button>
+                </div>
+              </details>
+            </section>
             <div class="console-head"><span>CONSOLA</span>
               <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK/BAT</label>
               <button type="button" class="button ghost" id="con-pause">Pausar</button>
@@ -164,7 +228,10 @@
         <section class="card receiver-card">
           <div class="rf-layout">
             <div class="rf-col rf-col-plot">
-              <p id="rf-tracking" class="rf-tracking" role="status">Sin seguimiento activo</p>
+              <div class="rf-header">
+                <p id="rf-tracking" class="rf-tracking" role="status">Sin seguimiento activo</p>
+                {{ rotor_lead("rf") }}
+              </div>
               <div class="rf-plot rf-plot-spec">
                 <canvas id="spectrum-canvas" class="spectrum-canvas" aria-label="Espectro RF recibido desde Maia"></canvas>
                 <div id="rx-empty" class="rf-empty">Esperando datos de Maia…</div>
@@ -185,6 +252,16 @@
                 <strong id="rx-cursor-freq">—</strong>
                 <span class="rf-peak-unit">MHz</span>
               </div>
+              <div class="rf-pass-metrics card-inset">
+                <h2>Métricas del pase</h2>
+                <dl>
+                  <div><dt>SNR máxima</dt><dd id="rf-pass-snr">—</dd></div>
+                  <div><dt>Pico medido</dt><dd id="rf-pass-peak">—</dd></div>
+                  <div><dt>Frecuencia central</dt><dd id="rf-pass-center">—</dd></div>
+                </dl>
+                <p id="rf-metrics-status" class="rf-note" role="status"></p>
+                <a class="button ghost" href="/api/rf/metrics.csv">Descargar CSV</a>
+              </div>
               <div class="rf-sweep card-inset">
                 <label class="rf-check"><input type="checkbox" id="rx-sweep"> Barrido de frecuencia central</label>
                 <div class="rf-sweep-params">
@@ -203,7 +280,8 @@
                 <small id="rx-integ-note" class="rf-note">—</small>
                 <small id="rx-integ-in" class="rf-note">—</small>
                 <div class="rf-stats">
-                  <div><small>RUIDO</small><b id="rx-noise">—</b></div>
+                  <div><small>NIVEL PICO</small><b id="rx-power">—</b><i>dB</i></div>
+                  <div><small>RUIDO</small><b id="rx-noise">—</b><i>dB</i></div>
                   <div><small>SNR PICO</small><b id="rx-snr">—</b><i>dB</i></div>
                 </div>
                 <label class="rf-check"><input type="checkbox" id="rx-noise-line" checked> Mostrar nivel de ruido</label>
@@ -225,6 +303,10 @@
             </div>
           </div>
         </section>
+      <aside id="rf-mini" class="rf-mini" aria-label="Seguimiento (copia)">
+        <div class="rf-mini-bar" id="rf-mini-bar"><span>SEGUIMIENTO</span><button type="button" id="rf-mini-toggle" class="rf-mini-btn" aria-label="Minimizar" aria-expanded="true">–</button></div>
+        <canvas id="sky-mini" aria-label="Trayectoria del satélite y del tracker"></canvas>
+      </aside>
       </section>
     </main>
   </div>

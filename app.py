@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import math
 import os
 import queue
+import sqlite3
 import threading
 from datetime import datetime
 
@@ -14,15 +17,16 @@ from flask import Flask, jsonify, render_template, request, Response, send_from_
 from flask_sock import Sock
 
 import gps_config
-from catalog import store
+from catalog import DATA, store
 from gps_link import gps
 from orbit import UTC, find_passes, position
 from simulation import SimulationSession, sessions
 from map_plot import render_map_base_png, render_map_overlay_png, observer_fraction
 from maia_rf import maia_rf
+from rf_metrics import FIELDS as RF_METRIC_FIELDS, RFPassMetrics
 import rotor_config
 from serial_link import SerialLink, list_ports, SIM_PORT
-from rotor_follow import RotorFollower
+from rotor_follow import MAX_LEAD_SECONDS, RotorFollower
 
 
 app = Flask(__name__)
@@ -48,8 +52,24 @@ def _rotor_broadcast(event):
                 pass
 
 
-rotor = SerialLink(on_event=_rotor_broadcast)
+def _rotor_serial_event(event):
+    _rotor_broadcast(event)
+    if (event.get("type") == "rotor_io" and event.get("dir") == "rx"
+            and event.get("text") in ("ERR,fault_az_limit", "ERR,track_wait")
+            and follower.active()):
+        follower.stop(hold=False)
+
+
+rotor = SerialLink(on_event=_rotor_serial_event)
 follower = RotorFollower(rotor, on_event=_rotor_broadcast)
+rf_metrics = RFPassMetrics(DATA / "rf_metrics.sqlite3")
+
+
+def _record_rf_frame(frame, center_hz, span_hz, received_at):
+    rf_metrics.observe(sessions.current(), frame, center_hz, span_hz, received_at)
+
+
+maia_rf.on_frame = _record_rf_frame
 
 
 DEFAULT_OBSERVER = (-33.4489, -70.6693, 570.0)     # Santiago; respaldo si no hay GPS ni valores
@@ -106,7 +126,8 @@ def error(message, code=400):
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", rotor_lead_seconds=follower.state()["lead_seconds"],
+                           rotor_lead_max=MAX_LEAD_SECONDS)
 
 
 @app.get("/api/status")
@@ -129,7 +150,12 @@ def gps_state():
 
 @app.post("/api/catalog/refresh")
 def refresh():
-    started = store.refresh_async()
+    """Actualiza TLE (CelesTrak) y transmisores (SatNOGS) por separado: {"source": "tle" | "tx" | "all"}."""
+    body = request.get_json(silent=True) or {}
+    source = str(body.get("source") or "all")
+    if source not in ("tle", "tx", "all"):
+        return error("source debe ser tle, tx o all.")
+    started = store.refresh_async(("tle", "tx") if source == "all" else (source,))
     return jsonify({"ok": True, "started": started, "catalog": store.status()})
 
 
@@ -182,7 +208,8 @@ def start_session():
     try:
         norad_id = int(body.get("norad_id"))
         observer = observer_from(body)
-        speed = int(body.get("speed", 10))
+        realtime = bool(body.get("realtime"))
+        speed = 1 if realtime else int(body.get("speed", 1))
         if speed not in (1, 5, 10, 20):
             raise ValueError("Velocidad permitida: 1, 5, 10 o 20")
         record = store.record(norad_id)
@@ -207,7 +234,7 @@ def start_session():
             transmitter = {**transmitter, "source": "SatNOGS DB"}
         azimuth = azimuth_filter(body)
         session = SimulationSession(record, observer, transmitter, speed, azimuth=azimuth,
-                                    hours=hour_filter(body) if azimuth else None)
+                                    hours=hour_filter(body) if azimuth else None, realtime=realtime)
         follower.stop(hold=True)                       # una sesión nueva reemplaza al seguimiento anterior
         sessions.add(session)
         follow_error = None
@@ -234,7 +261,7 @@ def _apply_real_rf(state):
         "simulated": False,
         "source": "Maia SDR",
         "mode": "Espectro real" if rf["streaming"] else "Esperando stream Maia",
-        "snr_db": None,  # no inferir SNR sin calibración/definición del formato
+        "snr_db": None,  # los máximos por pase se informan en /api/rf/status
         "signal_detected": None,  # no inferir presencia de señal solo por conectividad
         "frames_received": rf["frames_received"],
         "rf_connected": rf["connected"],
@@ -306,7 +333,32 @@ def ws_rf(ws):
 def rf_status():
     session = sessions.current()
     tracking = session.tracking_status() if session else None
-    return jsonify({"ok": True, **maia_rf.snapshot(), "server_url": maia_rf.base_url, "tracking": tracking})
+    metrics_error = rf_metrics.error
+    try:
+        peak = rf_metrics.peak(session.id if session else None)
+    except sqlite3.Error as exc:
+        peak = None
+        metrics_error = f"No se pudieron leer las métricas RF: {exc}"
+    return jsonify({"ok": True, **maia_rf.snapshot(), "server_url": maia_rf.base_url,
+                    "tracking": tracking, "pass_peak": peak, "metrics_error": metrics_error})
+
+
+@app.get("/api/rf/metrics.csv")
+def rf_metrics_csv():
+    try:
+        rows = rf_metrics.history()
+    except sqlite3.Error as exc:
+        return error(f"No se pudieron leer las métricas RF: {exc}", 500)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=RF_METRIC_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        if row["satellite"].lstrip().startswith(("=", "+", "-", "@")):
+            row["satellite"] = "'" + row["satellite"]
+        writer.writerow(row)
+    return Response(output.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="sattrack_rf_metrics.csv"',
+                             "Cache-Control": "no-store"})
 
 
 @app.get("/api/rf/config")
@@ -318,7 +370,8 @@ def rf_get_config():
         response.raise_for_status()
         cfg = response.json()
         maia_rf.set_config(cfg)
-        return jsonify(cfg)
+        rf = maia_rf.snapshot()
+        return jsonify({**cfg, "center_freq_hz": rf["center_freq_hz"], "span_hz": rf["span_hz"]})
     except requests.RequestException as exc:
         return error(f"No se pudo comunicar con Maia: {exc}", 502)
 
@@ -336,7 +389,8 @@ def rf_patch_config():
         response.raise_for_status()
         cfg = response.json()
         maia_rf.set_config(cfg)
-        return jsonify(cfg)
+        rf = maia_rf.snapshot()
+        return jsonify({**cfg, "center_freq_hz": rf["center_freq_hz"], "span_hz": rf["span_hz"]})
     except requests.RequestException as exc:
         return error(f"No se pudo comunicar con Maia: {exc}", 502)
 
@@ -460,8 +514,14 @@ def serial_connect():
 def serial_send():
     """Terminal serial: envía una línea manual a la ESP32."""
     body = request.get_json(silent=True) or {}
+    text = str(body.get("text") or "").strip()
+    # STOP/SET/TRK manuales mandan sobre el seguimiento automático: si el hilo siguiera enviando TRK (5 Hz),
+    # pisaría el comando y el rotor no se detendría.
+    if text.split(",")[0].strip().upper() in ("STOP", "SET", "TRK") and follower.active():
+        follower.stop(hold=False)
+        rotor.note("Seguimiento automático detenido por comando manual.")
     try:
-        rotor.send_raw(body.get("text"))
+        rotor.send_raw(text)
     except ValueError as exc:
         return error(exc)
     except RuntimeError as exc:
@@ -516,6 +576,17 @@ def rotor_follow_state():
     return jsonify({"ok": True, **follower.state()})
 
 
+@app.patch("/api/rotor/follow")
+def update_rotor_follow():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or "lead_seconds" not in body:
+        return error("Indica el adelanto en segundos.")
+    try:
+        return jsonify({"ok": True, **follower.set_lead_seconds(body["lead_seconds"])})
+    except ValueError as exc:
+        return error(exc)
+
+
 @app.post("/api/session/<session_id>/rotor-follow")
 def rotor_follow(session_id):
     session = sessions.get(session_id)
@@ -556,7 +627,7 @@ def ws_rotor(ws):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SatTrack orbital + monitor RF Maia SDR")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5003)
     parser.add_argument("--refresh-on-start", action="store_true")
     parser.add_argument("--pluto-ip", default=None,

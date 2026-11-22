@@ -4,3 +4,4 @@ __pycache__/
 data/*.log
 data/*.tmp
 /data/bno/
+data/rf_metrics.sqlite3*

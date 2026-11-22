@@ -5,7 +5,7 @@ Simulador de Maia SDR para probar MaiaView sin la Pluto.
 
 Imita los dos servicios que usa la interfaz:
   GET/PATCH  http://<host>:8000/api/ad9361   → configuración del AD9361
-  WS         ws://<host>:8000/waterfall      → frames de 4096 puntos float32 (dB)
+ WS         ws://<host>:8000/waterfall      → frames de 4096 puntos float32 de potencia lineal
 
 Las señales simuladas están en frecuencias absolutas (MHz), así que al
 cambiar la frecuencia central o el sample rate se mueven/desaparecen igual
@@ -67,13 +67,19 @@ def ad9361():
         return jsonify(dict(cfg))
 
 
+@app.get("/api")
+def api_state():
+    with lock:
+        return jsonify(ad9361=dict(cfg), spectrometer={"input": "AD9361"})
+
+
 def make_frame(t0: float) -> bytes:
     with lock:
         fc = cfg["rx_lo_frequency"]
         sr = cfg["sampling_frequency"]
         gain = cfg["rx_gain"]
 
-    freqs = np.linspace(fc - sr / 2, fc + sr / 2, N)      # Hz
+    freqs = fc + (np.arange(N) - N // 2) * sr / N         # Hz
     spec = NOISE_FLOOR_DB + 2.5 * np.random.randn(N)       # piso de ruido
     t = time.time() - t0
 
@@ -83,7 +89,7 @@ def make_frame(t0: float) -> bytes:
         spec += (power - NOISE_FLOOR_DB) * np.exp(-0.5 * ((freqs - f0) / sigma) ** 2)
 
     spec += (gain - 50.0) * 0.5                            # la ganancia sube el nivel
-    return spec.astype("<f4").tobytes()
+    return np.power(10.0, spec / 10.0).astype("<f4").tobytes()
 
 
 @sock.route("/waterfall")

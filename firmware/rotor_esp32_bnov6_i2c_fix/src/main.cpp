@@ -57,13 +57,15 @@
 //  Todo el movimiento es por velocidad. Cada 1 ms, por eje:
 //    SET : v = KP*error, limitada por la rampa de frenado sqrt(2*a*error) para llegar
 //          sin pasarse; dentro de GOTO_DEADBAND_DEG se detiene y vigila.
-//    TRK : v = vsat + KP*error, con la referencia extrapolada con la velocidad entre
-//          mensajes (feedforward + proporcional). Si no llegan TRK por TRK_TIMEOUT_MS
-//          frena y queda en reposo.
+//    TRK : v = vsat + KP*error + integral. La referencia se extrapola entre mensajes;
+//          la integral corrige el error sostenido y respeta los límites y la rampa.
+//          Si no llegan TRK por TRK_TIMEOUT_MS frena y queda en reposo.
 //  La velocidad cambia con una rampa (RAMP_ACCELERATION) y se convierte en pulsos STEP.
 //
 //  SEGURIDAD
 //  ----------------------------------------------------------------------------
+//  * El final de carrera de azimut (GPIO 32 a LOW) cancela el movimiento. Azimut
+//    puede retroceder en sentido contrario al último paso para liberar el contacto.
 //  * Sin datos del sensor por IMU_TIMEOUT_MS: los motores frenan y no se acepta SET/TRK.
 //  * Detector de fallas: cada FAULT_WINDOW_MS se compara el movimiento esperado según
 //    los pasos enviados con el medido. Si no coincide (sentido invertido, motor sin
@@ -91,8 +93,10 @@
 
 #include <cstring>
 
+#include "RotorAzLimit.h"
 #include "RotorConfig.h"
 #include "RotorMath.h"
+#include "RotorTrackPI.h"
 
 namespace cfg = RotorConfig;
 
@@ -111,12 +115,13 @@ struct AxisConfig {
   bool invertDir;
   double stepsPerDeg;
   float maxSpeed;  // pasos/s
+  double trackKi;
 };
 constexpr AxisConfig AXES[2] = {
     {cfg::AZ_STEP_PIN, cfg::AZ_DIR_PIN, cfg::AZ_INVERT_DIRECTION,
-     cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED},
+     cfg::AZ_STEPS_PER_DEG, cfg::AZ_MAX_SPEED, cfg::TRK_KI_AZ},
     {cfg::EL_STEP_PIN, cfg::EL_DIR_PIN, cfg::EL_INVERT_DIRECTION,
-     cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED},
+     cfg::EL_STEPS_PER_DEG, cfg::EL_MAX_SPEED, cfg::TRK_KI_EL},
 };
 
 // ── Comunicación entre tareas ────────────────────────────────────────────────
@@ -144,7 +149,11 @@ struct Pose {
   bool everValid = false;
 };
 
-enum Fault : uint8_t { FaultNone = 0, FaultAz = 1, FaultEl = 2 };
+enum Fault : uint8_t { FaultNone, FaultAz, FaultEl, FaultAzLimit, FaultAzLimitBlocked };
+constexpr const char *AZ_LIMIT_ERROR = "fault_az_limit";
+
+bool azLimitPressed() { return digitalRead(cfg::AZ_LIMIT_PIN) == LOW; }
+bool isAzLimitFault(Fault fault) { return fault == FaultAzLimit || fault == FaultAzLimitBlocked; }
 
 // Estado que motionTask() publica para loop().
 struct MotionState {
@@ -152,6 +161,7 @@ struct MotionState {
   bool calibrating = false;      // CALAX en curso
   uint32_t activeCommandId = 0;  // última orden ya procesada por motionTask
   Fault fault = FaultNone;
+  uint32_t azLimitTrips = 0;
   // Detalle de la última evaluación de falla (válido si fault != FaultNone).
   float faultExpectedDeg = 0;  // movimiento esperado según pasos enviados (con signo)
   float faultMeasuredDeg = 0;  // movimiento medido por el sensor en esa ventana
@@ -218,6 +228,7 @@ Pose poseSnapshot() {
 bool poseFresh(const Pose &pose, uint32_t nowMs) {
   return pose.everValid && nowMs - pose.ms <= cfg::IMU_TIMEOUT_MS;
 }
+bool poseFresh(const Pose &pose) { return poseFresh(pose, millis()); }
 
 // Mensaje de diagnóstico (empieza con '#', la interfaz lo ignora o lo registra).
 void note(const char *text) { controlUart.print("# "); controlUart.println(text); }
@@ -229,6 +240,8 @@ BNO080 bno08x;  // librería SparkFun (sin pines INT/RST)
 bool imuReady = false;
 uint32_t imuLastTryMs = 0;
 bool wireStarted = false;
+uint32_t imuLastReportMs = 0;  // último reporte de ORIENTACIÓN recibido (solo imuTask)
+uint32_t imuRestartCount = 0;  // reinicios seguidos sin datos (solo imuTask)
 
 // Rutina de calibración del magnetómetro. loop() solo deja una petición; la ejecuta
 // imuTask, que es la única tarea que toca el sensor por I2C.
@@ -358,6 +371,36 @@ void publishPose(double w, double x, double y, double z, float accuracyRad, uint
   portEXIT_CRITICAL(&poseMux);
 }
 
+// Libera un bus I2C trabado. Si el ESP32 se reinicia (o el cable falla) a mitad de una
+// transacción, el BNO085 puede quedarse sujetando SDA en bajo y Wire.begin() "funciona"
+// pero ya no llegan datos. Se emulan 9 pulsos de SCL en colector abierto + condición STOP.
+// Llamar con Wire detenido (antes de Wire.begin).
+void i2cBusRecover() {
+  const int sda = cfg::IMU_SDA_PIN, scl = cfg::IMU_SCL_PIN;
+  pinMode(sda, INPUT_PULLUP);
+  pinMode(scl, INPUT_PULLUP);
+  delayMicroseconds(10);
+  for (int i = 0; i < 9; ++i) {
+    pinMode(scl, OUTPUT); digitalWrite(scl, LOW);  delayMicroseconds(10);
+    pinMode(scl, INPUT_PULLUP);                    delayMicroseconds(10);
+    if (digitalRead(sda)) break;                   // el esclavo soltó SDA
+  }
+  // STOP: SDA sube mientras SCL está en alto.
+  pinMode(sda, OUTPUT); digitalWrite(sda, LOW);    delayMicroseconds(10);
+  pinMode(scl, INPUT_PULLUP);                      delayMicroseconds(10);
+  pinMode(sda, INPUT_PULLUP);                      delayMicroseconds(10);
+}
+
+// Reset por hardware del BNO085 (pin RST, activo en bajo). Sin cablear RST (-1) no hace nada.
+void imuHardwareReset() {
+  if (cfg::IMU_RST_PIN < 0) return;
+  pinMode(cfg::IMU_RST_PIN, OUTPUT);
+  digitalWrite(cfg::IMU_RST_PIN, LOW);
+  delay(10);
+  digitalWrite(cfg::IMU_RST_PIN, HIGH);
+  delay(300);  // arranque del BNO085 tras el reset
+}
+
 // Una pasada de lectura del sensor (la llama imuTask cada ~1 ms).
 // Si el sensor no está inicializado, reintenta cada segundo.
 void imuPoll() {
@@ -367,12 +410,15 @@ void imuPoll() {
     imuLastTryMs = now ? now : 1;
     if (wireStarted) Wire.end();  // reintento: liberar el bus antes de volver a iniciarlo
     wireStarted = true;
+    i2cBusRecover();      // libera SDA/SCL si quedaron trabados
+    imuHardwareReset();   // solo si IMU_RST_PIN está cableado
     Wire.begin(cfg::IMU_SDA_PIN, cfg::IMU_SCL_PIN);
     Wire.setClock(cfg::IMU_I2C_HZ);
     if (bno08x.begin(cfg::IMU_ADDRESS, Wire)) {
       imuEnableReport();
       imuReady = true;
-      note("imu ok");
+      imuLastReportMs = millis();  // desde aquí corre el vigilante de datos
+      note("imu responde por I2C; esperando datos de orientacion");
     } else {
       note("imu_init_failed: revisa cableado I2C (SDA/SCL/direccion)");
     }
@@ -392,10 +438,25 @@ void imuPoll() {
       publishPose(bno08x.getQuatReal(), bno08x.getQuatI(), bno08x.getQuatJ(), bno08x.getQuatK(),
                   cfg::IMU_USE_GAME_ROTATION ? NAN : bno08x.getQuatRadianAccuracy(),
                   bno08x.getQuatAccuracy());
+      imuLastReportMs = millis();
+      imuRestartCount = 0;
     }
   }
   if (gotData) updateMagAccuracy();
   serviceImuCalibration(now);
+
+  // Vigilante: begin() solo confirma que el sensor contesta por I2C, no que esté enviando
+  // orientación (el comando de activación puede perderse). Sin reportes por
+  // IMU_DATA_WATCHDOG_MS se rehace todo: bus, reset y begin. No se aplica mientras SAVECAL
+  // escribe en la flash del sensor. (Se usa millis() fresco: 'now' es anterior a la lectura.)
+  const uint32_t t = millis();
+  if (!saveStartMs && t - imuLastReportMs > cfg::IMU_DATA_WATCHDOG_MS) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "imu_sin_datos: reiniciando I2C y sensor (intento %lu)",
+             static_cast<unsigned long>(++imuRestartCount));
+    note(msg);
+    imuReady = false;
+  }
 }
 
 // Tarea del sensor (core 0): el I2C bloquea unos cientos de µs por lectura y aquí no
@@ -448,6 +509,7 @@ struct CalRun {
 
 struct Controller {
   CalRun cal;
+  RotorAzLimit azLimit;
   Mode mode = Mode::Idle;
   double tgt[2] = {0, 0};   // objetivo (°)
   double ff[2] = {0, 0};    // velocidad del objetivo (°/s), solo en Track
@@ -459,6 +521,9 @@ struct Controller {
   float cmd[2] = {0, 0};          // velocidad ordenada (pasos/s, con signo)
   double acc[2] = {0, 0};         // fracción de paso acumulada (ver emitSteps)
   long emitted[2] = {0, 0};       // pasos enviados en total (con signo)
+  int lastAzDir = 0;              // sentido del último pulso de azimut en movimiento normal
+  uint32_t lastAzStepMs = 0;
+  RotorTrack::Integrator trackIntegral[2];
   // Ventana del detector de fallas
   uint32_t winMs[2] = {0, 0};
   long winSteps[2] = {0, 0};
@@ -470,6 +535,14 @@ struct Controller {
   int faultAxis = 0;
   double lastMeasEl = 0;  // última elevación medida (para el informe de falla)
   uint8_t strikes[2] = {0, 0};  // ventanas malas consecutivas por eje
+
+  void setMode(Mode next) {
+    if (mode == Mode::Track && next != Mode::Track) {
+      trackIntegral[AZ].reset();
+      trackIntegral[EL].reset();
+    }
+    mode = next;
+  }
 };
 
 // Acerca `current` a `desired` cambiando a lo sumo `maxDelta` (rampa de velocidad).
@@ -486,27 +559,35 @@ double clampAbs(double x, double limit) {
 // Se acumula la fracción de paso (speed*dt) y se emite un pulso cada vez que se
 // completa uno: la velocidad media resulta exacta aunque el lazo corra a 1 ms
 // (con un intervalo entero de ms, 400 pasos/s saldrían a 333).
-void emitSteps(Controller &c, int axis, double dt) {
+enum class StepResult { NotDue, Emitted, SwitchChanged };
+
+StepResult emitSteps(Controller &c, int axis, double dt, bool backingOff = false) {
   c.acc[axis] += c.cmd[axis] * dt;
   if (c.acc[axis] > 2.0) c.acc[axis] = 2.0;
   if (c.acc[axis] < -2.0) c.acc[axis] = -2.0;
   int dir = 0;
   if (c.acc[axis] >= 1.0) { dir = 1; c.acc[axis] -= 1.0; }
   else if (c.acc[axis] <= -1.0) { dir = -1; c.acc[axis] += 1.0; }
-  if (dir == 0) return;
+  if (dir == 0) return StepResult::NotDue;
   const AxisConfig &a = AXES[axis];
   digitalWrite(a.dirPin, ((dir > 0) != a.invertDir) ? HIGH : LOW);
   delayMicroseconds(2);  // tiempo de establecimiento de DIR antes del pulso
+  // Solo el retroceso de azimut puede emitir pasos mientras el contacto está en LOW.
+  if (azLimitPressed() != backingOff) return StepResult::SwitchChanged;
   digitalWrite(a.stepPin, HIGH);
   delayMicroseconds(cfg::STEP_PULSE_US);
   digitalWrite(a.stepPin, LOW);
   c.emitted[axis] += dir;
+  if (axis == AZ && !backingOff) {
+    c.lastAzDir = dir;
+    c.lastAzStepMs = millis();
+  }
+  return StepResult::Emitted;
 }
 
-// Velocidad deseada (°/s, con signo) de un eje según el modo y el error de posición.
-double desiredRate(const Controller &c, int axis, double err) {
+// Velocidad deseada (°/s, con signo) para SET.
+double gotoRate(int axis, double err) {
   const double maxDeg = AXES[axis].maxSpeed / AXES[axis].stepsPerDeg;
-  if (c.mode == Mode::Track) return c.ff[axis] + cfg::CTRL_KP * err;
   // Goto: dentro de la banda muerta quieto; fuera, proporcional pero limitado por la
   // rampa de frenado v <= sqrt(2*a*distancia) para no pasarse del objetivo.
   const double absErr = err < 0 ? -err : err;
@@ -515,6 +596,15 @@ double desiredRate(const Controller &c, int axis, double err) {
   const double brake = sqrt(2.0 * aDeg * (absErr - cfg::GOTO_DEADBAND_DEG));
   const double lim = brake < maxDeg ? brake : maxDeg;
   return clampAbs(cfg::CTRL_KP * err, lim);
+}
+
+double trackRate(Controller &c, int axis, double err, double ff, double dt,
+                 RotorTrack::RateRange allowed) {
+  const AxisConfig &a = AXES[axis];
+  const double currentRate = c.cmd[axis] / a.stepsPerDeg;
+  const double rampDelta = cfg::RAMP_ACCELERATION * dt / a.stepsPerDeg;
+  return c.trackIntegral[axis].update(ff + cfg::CTRL_KP * err, a.trackKi * err * dt,
+                                     cfg::TRK_MAX_INTEGRAL_DEG_S, allowed, currentRate, rampDelta);
 }
 
 // Detector de fallas de un eje (ver cabecera). Devuelve true si detecta una falla.
@@ -553,6 +643,47 @@ void abortCal(Controller &c, const char *reason) {
   c.cal.data.aborted = true;
   c.cal.data.reason = reason;
   publishCal(c.cal.data);
+}
+
+void sampleAzLimit(Controller &c, bool pressed) {
+  const uint32_t nowMs = millis();
+  const bool wasTripped = c.azLimit.tripped();
+  const bool recentStep = nowMs - c.lastAzStepMs <= cfg::AZ_LIMIT_APPROACH_MS;
+  const bool motionActive = c.mode != Mode::Idle || c.cal.active;
+  const int approachDir = motionActive && recentStep && c.fault == FaultNone ? c.lastAzDir : 0;
+  c.azLimit.sample(pressed, nowMs, approachDir, cfg::AZ_LIMIT_RELEASE_MS);
+  if (wasTripped == c.azLimit.tripped()) return;
+
+  if (c.cal.active) abortCal(c, "final de carrera de azimut activo");
+  c.setMode(Mode::Idle);
+  c.cmd[AZ] = c.cmd[EL] = 0;
+  c.acc[AZ] = c.acc[EL] = 0;
+  c.lastAzDir = 0;
+  c.winValid[AZ] = c.winValid[EL] = false;
+  c.strikes[AZ] = c.strikes[EL] = 0;
+  xQueueReset(commandQueue);
+}
+
+void backOffAzLimit(Controller &c, double dt) {
+  const int dir = c.azLimit.backoffDirection();
+  if (dir != 0) {
+    const float speed = fminf(cfg::AZ_LIMIT_BACKOFF_SPEED, AXES[AZ].maxSpeed);
+    c.cmd[AZ] = ramp(c.cmd[AZ], dir * speed, static_cast<float>(cfg::RAMP_ACCELERATION * dt));
+    switch (emitSteps(c, AZ, dt, true)) {
+      case StepResult::Emitted:
+        c.azLimit.recordBackoffStep(cfg::AZ_LIMIT_BACKOFF_MAX_STEPS);
+        break;
+      case StepResult::SwitchChanged:
+        sampleAzLimit(c, false);
+        break;
+      case StepResult::NotDue:
+        break;
+    }
+  }
+  if (c.azLimit.backoffDirection() == 0) {
+    c.cmd[AZ] = 0;
+    c.acc[AZ] = 0;
+  }
 }
 
 // CALAX, un paso: mueve el eje del tramo actual en lazo abierto, espera a que el sensor se
@@ -613,21 +744,28 @@ void calStep(Controller &c, const Pose &pose, uint32_t nowMs, double desired[2])
 }
 
 // Un paso del lazo de control (cada ~1 ms).
-void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
+void controlStep(Controller &c, uint32_t nowUs) {
   double dt = (nowUs - c.lastUs) / 1e6;
   c.lastUs = nowUs;
   if (dt <= 0) return;
   if (dt > 0.05) dt = 0.05;  // tras una pausa larga no dar un salto de velocidad
+  if (c.azLimit.tripped()) {
+    backOffAzLimit(c, dt);
+    return;
+  }
 
   const Pose pose = poseSnapshot();
+  // La otra tarea puede publicar una muestra entre dos lecturas de reloj.
+  // Tomar la hora después de copiar la muestra evita una edad negativa sin signo.
+  const uint32_t nowMs = millis();
   const bool fresh = poseFresh(pose, nowMs);
   const double meas[2] = {pose.az, pose.el};
 
   if (c.mode == Mode::Track && nowMs - c.trkMs > cfg::TRK_TIMEOUT_MS)
-    c.mode = Mode::Idle;  // dejaron de llegar TRK: frenar y quedarse
+    c.setMode(Mode::Idle);  // dejaron de llegar TRK: frenar y quedarse
   // Sin medición reciente se frena y se olvida el objetivo: cuando el sensor vuelva
   // el rotor no debe retomar solo un movimiento viejo; espera una orden nueva.
-  if (!fresh) c.mode = Mode::Idle;
+  if (!fresh) c.setMode(Mode::Idle);
 
   if (c.cal.active && !fresh) abortCal(c, "el sensor dejo de responder");
 
@@ -635,33 +773,43 @@ void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
   if (c.cal.active) {
     calStep(c, pose, nowMs, desired);   // CALAX: movimiento en lazo abierto
   } else if (fresh && c.fault == FaultNone && c.mode != Mode::Idle) {
-    const double age = c.mode == Mode::Track ? (nowMs - c.trkMs) / 1000.0 : 0.0;
+    const bool tracking = c.mode == Mode::Track;
+    const double age = tracking ? (nowMs - c.trkMs) / 1000.0 : 0.0;
     for (int i = 0; i < 2; ++i) {
-      double ref = c.tgt[i] + c.ff[i] * age;  // objetivo extrapolado (Track)
+      const AxisConfig &a = AXES[i];
+      const double maxRate = a.maxSpeed / a.stepsPerDeg;
+      double ff = c.ff[i];
+      const double ref = c.tgt[i] + ff * age;  // objetivo extrapolado (Track)
+      RotorTrack::RateRange allowed{-maxRate, maxRate};
       double err;
       if (i == AZ) {
         err = cfg::AZ_SHORTEST_PATH ? RotorMath::wrap180(ref - meas[AZ])
                                     : RotorMath::normalizeAzimuth(ref) - meas[AZ];
+        if (!cfg::AZ_SHORTEST_PATH) {
+          if (meas[AZ] <= 0) allowed.min = 0;
+          if (meas[AZ] >= 360) allowed.max = 0;
+        }
       } else {
-        ref = ref < cfg::EL_MIN_DEG ? cfg::EL_MIN_DEG
-                                    : (ref > cfg::EL_MAX_DEG ? cfg::EL_MAX_DEG : ref);
-        err = ref - meas[EL];
+        const double limitedRef = ref < cfg::EL_MIN_DEG ? cfg::EL_MIN_DEG
+                                  : ref > cfg::EL_MAX_DEG ? cfg::EL_MAX_DEG : ref;
+        err = limitedRef - meas[EL];
+        if ((ref <= cfg::EL_MIN_DEG && ff < 0) || (ref >= cfg::EL_MAX_DEG && ff > 0)) ff = 0;
+        if (meas[EL] <= cfg::EL_MIN_DEG) allowed.min = 0;
+        if (meas[EL] >= cfg::EL_MAX_DEG) allowed.max = 0;
       }
-      desired[i] = clampAbs(desiredRate(c, i, err) * AXES[i].stepsPerDeg, AXES[i].maxSpeed);
+      const double rate = tracking ? trackRate(c, i, err, ff, dt, allowed)
+                                   : allowed.clamp(gotoRate(i, err));
+      desired[i] = rate * a.stepsPerDeg;
     }
-    // No empujar contra los límites mecánicos (según la posición medida).
-    if (!cfg::AZ_SHORTEST_PATH &&
-        ((meas[AZ] <= 0 && desired[AZ] < 0) || (meas[AZ] >= 360 && desired[AZ] > 0)))
-      desired[AZ] = 0;
-    if ((meas[EL] <= cfg::EL_MIN_DEG && desired[EL] < 0) ||
-        (meas[EL] >= cfg::EL_MAX_DEG && desired[EL] > 0))
-      desired[EL] = 0;
   }
 
   const float maxDelta = static_cast<float>(cfg::RAMP_ACCELERATION * dt);
   for (int i = 0; i < 2; ++i) {
     c.cmd[i] = ramp(c.cmd[i], static_cast<float>(desired[i]), maxDelta);
-    emitSteps(c, i, dt);
+    if (emitSteps(c, i, dt) == StepResult::SwitchChanged) {
+      sampleAzLimit(c, true);
+      return;
+    }
   }
 
   // Detector de fallas. El azimut no se evalúa cerca del cenit (indefinido). Durante CALAX se
@@ -675,7 +823,7 @@ void controlStep(Controller &c, uint32_t nowMs, uint32_t nowUs) {
     else if (checkAxisFault(c, EL, meas[EL], fresh, nowMs)) c.fault = FaultEl;
     if (c.fault != FaultNone) {  // frenado inmediato; STOP la borra
       c.faultAxis = c.fault == FaultAz ? AZ : EL;
-      c.mode = Mode::Idle;
+      c.setMode(Mode::Idle);
       c.cmd[AZ] = c.cmd[EL] = 0;
     }
   }
@@ -689,8 +837,10 @@ void motionTask(void *) {
   ctl.lastUs = micros();
 
   for (;;) {
+    sampleAzLimit(ctl, azLimitPressed());
     MotionCommand cmd;
-    if (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE) {
+    if (xQueueReceive(commandQueue, &cmd, 0) == pdTRUE &&
+        (!ctl.azLimit.tripped() || cmd.type == CommandType::Stop)) {
       state.activeCommandId = cmd.id;
       switch (cmd.type) {
         case CommandType::CalAxes:
@@ -701,30 +851,34 @@ void motionTask(void *) {
           break;
         case CommandType::Target:
           if (ctl.cal.active) break;  // ocupado calibrando (loop ya lo rechaza)
-          ctl.mode = Mode::Goto;
+          ctl.setMode(Mode::Goto);
           ctl.tgt[AZ] = cmd.az;  ctl.tgt[EL] = cmd.el;
           ctl.ff[AZ] = ctl.ff[EL] = 0;
           break;
         case CommandType::Track:
           if (ctl.cal.active) break;
-          ctl.mode = Mode::Track;
+          ctl.setMode(Mode::Track);
           ctl.tgt[AZ] = cmd.az;  ctl.tgt[EL] = cmd.el;
           ctl.ff[AZ] = cmd.vaz;  ctl.ff[EL] = cmd.vel;
           ctl.trkMs = cmd.timeMs;
           break;
         case CommandType::Stop:
           if (ctl.cal.active) abortCal(ctl, "interrumpida por STOP");
-          ctl.mode = Mode::Idle;  // frena con la rampa
+          ctl.setMode(Mode::Idle);  // frena con la rampa
           ctl.fault = FaultNone;  // STOP borra la falla
           ctl.winValid[AZ] = ctl.winValid[EL] = false; ctl.strikes[AZ] = ctl.strikes[EL] = 0;
+          ctl.azLimit.cancelBackoff();
           break;
       }
     }
 
-    controlStep(ctl, millis(), micros());
+    controlStep(ctl, micros());
     state.moving = ctl.cmd[AZ] != 0 || ctl.cmd[EL] != 0;
     state.calibrating = ctl.cal.active;
+    state.azLimitTrips = ctl.azLimit.trips();
     state.fault = ctl.fault;
+    if (ctl.azLimit.tripped())
+      state.fault = ctl.azLimit.canBackOff() ? FaultAzLimit : FaultAzLimitBlocked;
     if (ctl.fault != FaultNone) {
       state.faultExpectedDeg = static_cast<float>(ctl.evalExpected[ctl.faultAxis]);
       state.faultMeasuredDeg = static_cast<float>(ctl.evalActual[ctl.faultAxis]);
@@ -826,9 +980,17 @@ void reportBno() {
 // Si el movimiento se declaró en falla, avisa una vez por la interfaz.
 void reportFaults() {
   static Fault reported = FaultNone;
-  const Fault now = motionSnapshot().fault;
-  if (now != reported && now != FaultNone) {
-    const MotionState st = motionSnapshot();
+  const MotionState st = motionSnapshot();
+  const Fault now = st.fault;
+  if (now == reported) return;
+  if (isAzLimitFault(reported) && !isAzLimitFault(now))
+    note("final de carrera de azimut liberado; STOP automatico");
+  reported = now;
+  if (isAzLimitFault(now)) {
+    uartError(AZ_LIMIT_ERROR);
+    note(now == FaultAzLimit ? "final de carrera de azimut activo; retroceso automatico"
+                             : "final de carrera de azimut bloqueado; rotor detenido");
+  } else if (now != FaultNone) {
     const bool az = now == FaultAz;
     uartError(az ? "fault_az" : "fault_el");
     // Motivo: comparar lo esperado (pasos enviados) con lo medido por el sensor.
@@ -847,7 +1009,6 @@ void reportFaults() {
     note(msg);
     note("motores detenidos; corrige y envia STOP");
   }
-  reported = now;
 }
 
 // Procesa el resultado de una CALAX: calcula, informa y guarda el eje de la antena corregido.
@@ -931,9 +1092,11 @@ void processCalibration() {
 
 // Comprueba que se pueden aceptar SET/TRK; si no, responde el error y devuelve false.
 bool motionAllowed() {
-  if (motionSnapshot().calibrating || magCalActive) { uartError("busy"); return false; }
-  if (motionSnapshot().fault != FaultNone) { uartError("fault"); return false; }
-  if (!poseFresh(poseSnapshot(), millis())) { uartError("no_imu"); return false; }
+  const MotionState st = motionSnapshot();
+  if (isAzLimitFault(st.fault) || azLimitPressed()) { uartError(AZ_LIMIT_ERROR); return false; }
+  if (st.calibrating || magCalActive) { uartError("busy"); return false; }
+  if (st.fault != FaultNone) { uartError("fault"); return false; }
+  if (!poseFresh(poseSnapshot())) { uartError("no_imu"); return false; }
   return true;
 }
 
@@ -967,8 +1130,14 @@ void handleCommand(char *line) {
     } else if (!RotorMath::validTarget(v[0], v[1], cfg::EL_MIN_DEG, cfg::EL_MAX_DEG) ||
                fabs(v[2]) > 360.0 || fabs(v[3]) > 360.0) {
       uartError("invalid_target");
-    } else if (motionAllowed()) {
-      queueCommand(CommandType::Track, RotorMath::normalizeAzimuth(v[0]), v[1], v[2], v[3]);
+    } else {
+      static RotorTrackAfterLimit trackStream;
+      const MotionState st = motionSnapshot();
+      const bool limitActive = isAzLimitFault(st.fault) || azLimitPressed();
+      if (!trackStream.accept(millis(), st.azLimitTrips, limitActive, cfg::TRK_TIMEOUT_MS))
+        uartError(limitActive ? AZ_LIMIT_ERROR : "track_wait");
+      else if (motionAllowed())
+        queueCommand(CommandType::Track, RotorMath::normalizeAzimuth(v[0]), v[1], v[2], v[3]);
     }
   } else if (strcmp(text, "STOP") == 0) {
     if (queueCommand(CommandType::Stop, 0, 0)) controlUart.println("ACK");
@@ -990,7 +1159,8 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "CALAX") == 0) {
     const MotionState st = motionSnapshot();
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (isAzLimitFault(st.fault) || azLimitPressed()) uartError(AZ_LIMIT_ERROR);
+    else if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else if (queueCommand(CommandType::CalAxes, 0, 0)) {
       controlUart.println("ACK");
@@ -1023,7 +1193,7 @@ void handleCommand(char *line) {
     }
   } else if (strcmp(text, "MAGCAL") == 0) {
     const MotionState st = motionSnapshot();
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (st.moving || st.calibrating || st.fault != FaultNone || magCalActive) uartError("busy");
     else {
       magCalActive = true;  // desde ya no se aceptan SET/TRK/CALAX
@@ -1031,7 +1201,7 @@ void handleCommand(char *line) {
       controlUart.println("ACK");
     }
   } else if (strcmp(text, "SAVECAL") == 0) {
-    if (!poseFresh(poseSnapshot(), millis())) uartError("no_imu");
+    if (!poseFresh(poseSnapshot())) uartError("no_imu");
     else if (motionSnapshot().moving) uartError("busy");
     else { requestImu(ImuReqSaveCal); controlUart.println("ACK"); }
   } else if (strcmp(text, "ENDCAL") == 0) {
@@ -1126,6 +1296,7 @@ void setup() {
     pinMode(a.dirPin, OUTPUT);
     digitalWrite(a.stepPin, LOW);
   }
+  pinMode(cfg::AZ_LIMIT_PIN, INPUT_PULLUP);
   analogReadResolution(12);
   analogSetPinAttenuation(cfg::BAT_PIN, ADC_11db);  // rango del pin ~0-3.3 V
 

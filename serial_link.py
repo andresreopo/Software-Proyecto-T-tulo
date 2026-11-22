@@ -5,6 +5,7 @@ Enlace serial bidireccional con la ESP32 que mueve el rotor.
 
 Protocolo (texto, una línea por mensaje terminada en \\n, 115200 baud por defecto):
   PC    → ESP32 :  SET,<az>,<el>     referencia en grados, p. ej.  SET,123.40,45.00
+  PC    → ESP32 :  STOP              detiene el movimiento: el rotor se queda donde está y cancela el seguimiento
   PC    → ESP32 :  TRK,<az>,<el>,<vaz>,<vel>
                    seguimiento: posición del satélite en grados y su velocidad angular
                    en °/s (vaz > 0 = azimut creciente). Se envía a ~5 Hz; la ESP32 debe
@@ -122,6 +123,10 @@ class SimPort:
             try:
                 if len(p) == 3 and p[0].upper() == "SET":
                     self.tgt = (float(p[1]) % 360.0, float(p[2]))
+                    self.trk, self.ff = False, (0.0, 0.0)
+                    self._q.put(b"ACK\n")
+                elif len(p) == 1 and p[0].upper() == "STOP":
+                    self.tgt = (self.az, self.el)
                     self.trk, self.ff = False, (0.0, 0.0)
                     self._q.put(b"ACK\n")
                 elif len(p) == 5 and p[0].upper() == "TRK":
@@ -287,6 +292,10 @@ class SerialLink:
             self._tgt = (az, el)
         self._emit()
         return self.state()
+
+    def note(self, text: str) -> None:
+        """Línea informativa en la consola serial (no se envía al puerto)."""
+        self._io("sys", text)
 
     def send_raw(self, text: str) -> None:
         """Comando manual de la terminal: una línea de texto imprimible, tal cual, terminada en \\n."""

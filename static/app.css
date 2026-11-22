@@ -233,6 +233,12 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
   #panel-track .link-controls{grid-template-columns:minmax(0,1fr) 80px auto}
   #panel-track .link-controls #rot-conn{grid-column:auto;margin-top:0;padding-inline:8px}
 }
+.rot-lead-header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px}
+.rot-lead-header .rotor-field{margin:0}
+.rot-lead-header output{font:700 16px var(--mono);color:var(--cyan);white-space:nowrap}
+.rot-lead-controls{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:8px;color:var(--muted);white-space:nowrap}
+.rot-lead-controls input{width:100%;min-width:0;height:37px;margin:0;accent-color:var(--cyan)}
+.rot-lead-status:empty,.rf-pass-metrics .rf-note:empty{display:none}
 
 /* Fuentes grandes (mínimo 16 px): ajustes de maquetación para 7" */
 .el-legend{display:none!important}
@@ -268,3 +274,82 @@ input[type=number],input[type=search],select,.button{min-height:40px;height:40px
 .dual-range input[type=range]::-webkit-slider-runnable-track{background:none}.dual-range input[type=range]::-moz-range-track{background:none}
 .hour-filter.off .dual-range{opacity:.45}
 .rf-tracking{color:#1e3241;font-weight:700;line-height:1.2;padding:2px 4px 6px;overflow-wrap:anywhere}
+.rf-header{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,42%);align-items:center;gap:12px;padding:4px 8px;flex:none}
+.rf-pass-metrics h2{font-size:16px}
+.rf-pass-metrics dl{margin:8px 0}
+.rf-pass-metrics dl div{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 8px;margin:4px 0}
+.rf-pass-metrics dd{margin:0;font:700 16px var(--mono);white-space:nowrap}
+.rf-pass-metrics .button{display:inline-flex;margin-top:4px}
+@media(max-width:720px){
+  #panel-rf .receiver-card,#panel-rf .rf-layout{height:auto}
+  #panel-rf .rf-layout{grid-template-columns:minmax(0,1fr)}
+  #panel-rf .rf-col-plot{height:clamp(320px,65dvh,520px)}
+  #panel-rf .rf-col-ctl{overflow:visible}
+  .rf-header{grid-template-columns:minmax(0,1fr);gap:4px}
+}
+
+/* Comandos del tracker (botones + sliders) */
+.cmd-panel{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.cmd-panel .console-head small{margin:0 0 0 auto;font-size:14px}
+.cmd-quick{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.cmd-quick .button{flex:1 1 auto;min-width:84px;padding:0 10px}
+.cmd-quick .button.cmd-stop{background:#880000;color:#fff;border-color:#5c0000;flex:1 1 100%;min-height:48px;font-size:18px;letter-spacing:.05em}
+.cmd-quick .button.cmd-stop:hover:enabled{background:#a00000}
+.cmd-group{margin-top:8px;border:1px solid var(--line);border-radius:7px;background:#f7fafc}
+.cmd-group summary{cursor:pointer;min-height:40px;display:flex;align-items:center;padding:0 11px;font:700 16px var(--mono);letter-spacing:.04em;color:#153645}
+.cmd-body{padding:0 11px 11px}
+.cmd-body .rotor-hint{margin:2px 0 8px}
+.cmd-slider{display:block;margin:8px 0}
+.cmd-slider-head{display:flex;justify-content:space-between;gap:8px;font-size:16px;color:var(--muted);font-weight:600}
+.cmd-slider-head output{font:700 16px var(--mono);color:var(--text);font-variant-numeric:tabular-nums}
+.cmd-slider input[type=range]{width:100%;height:34px;margin:2px 0 0;accent-color:var(--cyan);touch-action:pan-y}
+.cmd-body .button.full{margin-top:6px}
+.cmd-body .cmd-quick{margin-top:12px}
+
+/* Ventana flotante con el radar en la pestaña RF */
+.rf-mini{position:fixed;left:14px;bottom:14px;z-index:15;width:clamp(190px,24vw,260px);border:1px solid var(--line);border-radius:10px;background:#fdfdfef2;box-shadow:0 8px 26px #0003;overflow:hidden;backdrop-filter:blur(6px)}
+.rf-mini[hidden]{display:none}
+.rf-mini-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 6px 0 10px;height:32px;background:#f2f7f9;border-bottom:1px solid var(--line);font:700 13px var(--mono);letter-spacing:.07em;color:var(--cyan);cursor:grab;touch-action:none;user-select:none}
+.rf-mini-bar:active{cursor:grabbing}
+.rf-mini-btn{width:30px;height:26px;border:1px solid var(--line);border-radius:5px;background:#f5f9fb;color:var(--muted);font:700 16px var(--mono);line-height:1;padding:0}
+.rf-mini canvas{width:100%;aspect-ratio:1/1;height:auto}
+.rf-mini.min canvas{display:none}.rf-mini.min .rf-mini-bar{border-bottom:0}
+@media(max-width:700px){.rf-mini{width:170px;left:8px;bottom:8px}}
+
+/* Comandos compactos: letra menor y la consola serial nunca se aplasta (la tarjeta se desplaza si no cabe) */
+#panel-track .link-card{overflow-y:auto;scrollbar-width:thin}
+#panel-track .link-card>*{flex-shrink:0}
+#panel-track .serial-console{flex:1 0 170px;min-height:170px}
+.cmd-panel{margin-top:6px;padding-top:6px;font-size:13px}
+.cmd-panel .console-head{margin:0 0 4px}
+.cmd-panel .console-head>span{display:inline}
+.cmd-panel .console-head small,#panel-track .cmd-panel .rotor-hint{font-size:12px;margin:2px 0 4px}
+.cmd-panel .button{font-size:13px;min-height:30px;height:30px;padding:0 8px}
+.cmd-quick{gap:4px;margin:4px 0}
+.cmd-quick .button{min-width:62px}
+.cmd-quick .button.cmd-stop{min-height:34px;height:34px;font-size:14px}
+.cmd-group{margin-top:5px}
+.cmd-group summary{min-height:30px;font-size:13px;padding:0 8px}
+.cmd-body{padding:0 8px 8px;display:grid;grid-template-columns:1fr 1fr;column-gap:10px}
+.cmd-body>.rotor-hint,.cmd-body>.button,.cmd-body>.cmd-quick{grid-column:1 / -1}
+.cmd-body .button.full{margin-top:4px}
+.cmd-slider{margin:3px 0}
+.cmd-slider-head,.cmd-slider-head output{font-size:12px}
+.cmd-slider input[type=range]{height:22px}
+/* La zona de comandos tiene alto propio (se desplaza por dentro) para dejar sitio a la consola */
+.cmd-panel{max-height:clamp(120px,26dvh,230px);overflow-y:auto;scrollbar-width:thin;padding-right:2px}
+#panel-track .serial-console{flex:1 0 130px;min-height:130px}
+#panel-track .link-controls{grid-template-columns:minmax(0,1fr) 92px 128px}
+#panel-track .link-controls #rot-conn{grid-column:auto;margin-top:0}
+#panel-track .link-controls .rotor-field{margin-bottom:0}
+
+/* Botones independientes de actualización (TLE / transmisores) */
+.refresh-group{gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.catalog-summary .refresh-btn{width:auto;height:34px;padding:0 10px;font:600 14px var(--mono);white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.refresh-btn i{font-style:normal}
+.refresh-btn.busy i{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Selección: Bajada | Modo | botón en una sola fila (como antes); la frecuencia manual, si aparece, va debajo */
+.selection-controls #manual-wrap{order:5}
+@media(min-width:901px){.selection-controls{grid-template-columns:minmax(160px,1fr) 104px auto}.selection-controls #start-session{white-space:nowrap}}

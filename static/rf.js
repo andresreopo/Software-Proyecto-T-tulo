@@ -1,5 +1,5 @@
 /* Monitor RF — portado de MaiaView (server/templates/index.html).
- * Recibe frames float32 (dB) por /ws/rf, dibuja espectro y waterfall a resolución completa
+ * Recibe potencia lineal float32 por /ws/rf y dibuja espectro y waterfall en esa escala
  * y controla el AD9361 por /api/rf/config. Depende de log() y toast() de app.js. */
 (() => {
 "use strict";
@@ -13,15 +13,14 @@ const wfBuf = document.createElement("canvas"), bctx = wfBuf.getContext("2d");
 wfBuf.width = 4096; wfBuf.height = 256;
 bctx.fillStyle = css("--bg"); bctx.fillRect(0, 0, wfBuf.width, wfBuf.height);
 
-let cfg = {freq: 0, rate: 0, bw: 0};
+let cfg = {freq: 0, rate: 0};
 let N = 0;
-let smooth = null, peaks = null;
-// Integrador: promedio móvil exponencial directo sobre el dato tal como llega (sin suponer escala), con arranque
+let smooth = null;
+// Integrador: promedio móvil exponencial de potencia lineal, con arranque
 // en promedio acumulado. Con M frames la desviación del ruido baja ≈ √M, así que las señales débiles emergen del piso.
-let lin = null, integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noiseDb = null;
-let inStats = {min: 0, max: 0, bad: 0};
-function resetIntegration() { lin = null; integSeen = 0; noiseDb = null; if (smooth) peaks = Float32Array.from(smooth); }
-let lo = -120, hi = -20;
+let integM = 4, integSeen = 0, fps = 0, prevFrameT = 0, noisePower = null;
+function resetIntegration() { smooth = null; integSeen = 0; noisePower = null; }
+let lo = 0, hi = 1;
 let hoverX = null, lastFrameAt = 0, wsState = "disconnected";
 const PAD = {l: 60, r: 24, t: 10, b: 28};
 
@@ -48,9 +47,16 @@ function niceStep(range, target) {
   const raw = range / target, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
 }
-const fmtDb = (v, sy) => { const a = Math.abs(v);
-  return a >= 1e6 ? trimZeros(v / 1e6, 2) + "M" : a >= 1e4 ? trimZeros(v / 1e3, 1) + "k" : sy < 1 ? v.toFixed(1) : v.toFixed(0); };
+const powerDb = power => 10 * Math.log10(power);
+const validPower = power => Number.isFinite(power) && power > 0;
 const trimZeros = (v, d) => v.toFixed(d).replace(/\.?0+$/, "");
+function fmtPower(value, step) {
+  if (value === 0) return "0";
+  const scale = value >= 1e6 ? 1e6 : value >= 1e4 ? 1e3 : 1;
+  const unit = scale === 1e6 ? "M" : scale === 1e3 ? "k" : "";
+  const precision = Math.max(1, Math.ceil(-Math.log10(step / scale)));
+  return precision > 6 ? value.toExponential(2) : trimZeros(value / scale, precision) + unit;
+}
 const fmtMHz = v => v.toFixed(4) + " MHz";
 const fmtHz = v => v >= 1e6 ? (v / 1e6).toFixed(3) + " MHz" : v >= 1e3 ? (v / 1e3).toFixed(2) + " kHz" : v.toFixed(0) + " Hz";
 
@@ -84,7 +90,6 @@ function estimateNoise(a) {
   const s = Float32Array.from(a.subarray(Math.floor(a.length * .1), Math.ceil(a.length * .9))).sort();
   return s[s.length >> 1];
 }
-const fmtIn = v => !Number.isFinite(v) ? "—" : Math.abs(v) >= 1e4 || (v !== 0 && Math.abs(v) < 0.01) ? v.toExponential(2) : v.toFixed(2);
 function peakIndex(a) { let k = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[k]) k = i; return k; }
 
 // ── Espectro ────────────────────────────────────────────────────────────────
@@ -92,7 +97,7 @@ function drawSpectrum() {
   // El margen izquierdo se ajusta al ancho de las etiquetas para que el número siempre quepa.
   if (cfg.rate && hi > lo) {
     const sy0 = niceStep(hi - lo, 4); sctx.font = "16px " + css("--mono");
-    const wmax = Math.max(sctx.measureText(fmtDb(lo, sy0)).width, sctx.measureText(fmtDb(hi, sy0)).width);
+    const wmax = Math.max(sctx.measureText(fmtPower(lo, sy0)).width, sctx.measureText(fmtPower(hi, sy0)).width);
     PAD.l = Math.max(60, Math.ceil(wmax) + 14);
   }
   const g = prep(specC, sctx, 4);
@@ -106,7 +111,7 @@ function drawSpectrum() {
   for (let v = Math.ceil(lo / sy) * sy; v <= hi; v += sy) {
     const y = Math.round(Y(v)) + .5;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke();
-    sctx.fillText(fmtDb(v, sy), g.x0 - 6, y);
+    sctx.fillText(fmtPower(v, sy), g.x0 - 6, y);
   }
   freqAxis(sctx, g, border, false);
   sctx.strokeStyle = border; sctx.strokeRect(g.x0 + .5, g.y0 + .5, g.x1 - g.x0, g.y1 - g.y0);
@@ -117,22 +122,22 @@ function drawSpectrum() {
     sctx.strokeStyle = color; sctx.lineWidth = lw; sctx.beginPath();
     const n = arr.length, step = Math.max(1, Math.floor(n / (g.x1 - g.x0)));
     for (let i = 0; i < n; i += step) {
-      const x = g.x0 + i / (n - 1) * (g.x1 - g.x0), y = Y(arr[i]);
+      const x = g.x0 + i / n * (g.x1 - g.x0), y = Y(arr[i]);
       i ? sctx.lineTo(x, y) : sctx.moveTo(x, y);
     }
     sctx.stroke();
   };
     line(smooth, css("--cyan"), 1.4);
-  if (noiseDb !== null && q("rx-noise-line").checked) {
-    const y = Y(noiseDb);
+  if (noisePower !== null && q("rx-noise-line").checked) {
+    const y = Y(noisePower);
     sctx.save(); sctx.setLineDash([6, 4]); sctx.strokeStyle = css("--amber"); sctx.lineWidth = 1.2;
     sctx.beginPath(); sctx.moveTo(g.x0, y); sctx.lineTo(g.x1, y); sctx.stroke(); sctx.restore();
     sctx.fillStyle = css("--amber"); sctx.font = "14px " + css("--mono"); sctx.textAlign = "right"; sctx.textBaseline = "bottom";
-    sctx.fillText("ruido " + fmtIn(noiseDb), g.x1 - 4, y - 2);
+    sctx.fillText("ruido " + fmtPower(noisePower, noisePower * .01), g.x1 - 4, y - 2);
   }
 
   {
-    const k = peakIndex(smooth), x = g.x0 + k / (smooth.length - 1) * (g.x1 - g.x0), y = Y(smooth[k]);
+    const k = peakIndex(smooth), x = g.x0 + k / smooth.length * (g.x1 - g.x0), y = Y(smooth[k]);
     sctx.fillStyle = css("--amber"); sctx.beginPath();
     sctx.moveTo(x, y - 3); sctx.lineTo(x - 5, y - 12); sctx.lineTo(x + 5, y - 12); sctx.closePath(); sctx.fill();
   }
@@ -176,16 +181,20 @@ function draw() {
   requestAnimationFrame(() => { drawPending = false; if (q("panel-rf").hidden) return; drawSpectrum(); drawWaterfall(); });
 }
 
-// ── Escala vertical automática (rango fijo en múltiplos de 10 dB; se contrae tras ~3 s) ──
+// ── Escala vertical automática en potencia lineal ────────────────────────────
 let shrinkFrames = 0, rangeInit = false;
 function autoScale() {
   let mn = Infinity, mx = -Infinity;
   for (let i = 0; i < N; i++) { const v = smooth[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
-  const tlo = Math.floor((mn - 5) / 10) * 10, thi = Math.ceil((mx + 5) / 10) * 10;
+  const padding = Math.max((mx - mn) * .05, mx * .01);
+  const step = niceStep(mx - mn + 2 * padding, 4);
+  const tlo = Math.max(0, Math.floor((mn - padding) / step) * step);
+  const thi = Math.ceil((mx + padding) / step) * step;
   if (!rangeInit) { lo = tlo; hi = thi; rangeInit = true; return; }
   if (tlo < lo) lo = tlo;
   if (thi > hi) hi = thi;
-  shrinkFrames = (tlo > lo + 10 || thi < hi - 10) ? shrinkFrames + 1 : 0;
+  const slack = (hi - lo) * .15;
+  shrinkFrames = (tlo > lo + slack || thi < hi - slack) ? shrinkFrames + 1 : 0;
   if (shrinkFrames > 60) { lo = tlo; hi = thi; shrinkFrames = 0; }
 }
 
@@ -206,30 +215,28 @@ function updatePill() {
 // ── Frames de espectro ──────────────────────────────────────────────────────
 let lastPeakTxt = 0;
 function onSpectrum(buf) {
-  if (buf.byteLength % 4) return;
-  const a = new Float32Array(buf); N = a.length; lastFrameAt = performance.now();
+  if (buf.byteLength < 8 || buf.byteLength % 4) return;
+  const a = new Float32Array(buf);
+  // Maia manda potencia lineal. Los ceros, valores negativos y no finitos no son niveles en dB.
+  let mn = Infinity, mx = -Infinity, bad = 0;
+  for (const v of a) { if (validPower(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } else bad++; }
+  if (!Number.isFinite(mn)) return;
+  N = a.length;
+  lastFrameAt = performance.now();
   q("rx-empty").style.display = "none";
   const nowT = performance.now();
   if (prevFrameT && nowT - prevFrameT < 2000) fps = fps ? 0.9 * fps + 0.1 * (1000 / (nowT - prevFrameT)) : 1000 / (nowT - prevFrameT);
   prevFrameT = nowT;
-  if (!smooth || smooth.length !== N) { smooth = Float32Array.from(a); peaks = Float32Array.from(a); lin = null; }
-  if (!lin || lin.length !== N) { lin = new Float64Array(N); integSeen = 0; }
-  // Estadística de entrada (y bins no finitos, que no deben contaminar el promedio)
-  let mn = Infinity, mx = -Infinity, bad = 0;
-  for (let i = 0; i < N; i++) { const v = a[i]; if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } else bad++; }
-  inStats = {min: mn, max: mx, bad};
-  if (!Number.isFinite(mn)) return;                       // frame sin ningún valor válido
-  const fill = integSeen === 0 && bad ? (Float32Array.from(a).filter(Number.isFinite).sort()[0 | (N - bad) / 2]) : 0;
+  if (!smooth || smooth.length !== N) {
+    smooth = new Float64Array(N); integSeen = 0; noisePower = null;
+  }
+  const fill = integSeen === 0 && bad ? a.filter(validPower).sort()[Math.floor((N - bad) / 2)] : 0;
   integSeen++;
   const alpha = 1 / Math.min(integM, integSeen);
   for (let i = 0; i < N; i++) {
-    let v = a[i];
-    if (!Number.isFinite(v)) { if (integSeen === 1) v = fill; else { v = null; } }
-    if (v !== null) {
-      lin[i] = integSeen === 1 ? v : lin[i] + alpha * (v - lin[i]);
-    }
-    smooth[i] = lin[i];
-    if (smooth[i] > peaks[i]) peaks[i] = smooth[i];
+    const v = a[i];
+    if (integSeen === 1) smooth[i] = validPower(v) ? v : fill;
+    else if (validPower(v)) smooth[i] += alpha * (v - smooth[i]);
   }
   autoScale();
   pushWaterfallRow(smooth);          // la cascada también muestra la señal integrada
@@ -237,15 +244,17 @@ function onSpectrum(buf) {
   const now = performance.now();
   if (now - lastPeakTxt > 250) {
     lastPeakTxt = now;
-    const pk = peakIndex(smooth), fpk = (cfg.freq - cfg.rate / 2 + pk / (N - 1) * cfg.rate) / 1e6;
-    q("rx-peak-big").textContent = trimZeros(fpk, 4);
-    noiseDb = estimateNoise(smooth);
-    // El dato no se asume en dB: el ruido va en las unidades de entrada y el SNR como relación de potencia 10·log10(pico/ruido).
-    q("rx-noise").textContent = fmtIn(noiseDb);
-    q("rx-snr").textContent = smooth[pk] > 0 && noiseDb > 0 ? (10 * Math.log10(smooth[pk] / noiseDb)).toFixed(1) : "—";
+    const pk = peakIndex(smooth), fpk = cfg.freq + (pk - Math.floor(N / 2)) * cfg.rate / N;
+    q("rx-peak-big").textContent = cfg.rate ? trimZeros(fpk / 1e6, 4) : "—";
+    noisePower = estimateNoise(smooth);
+    const peakDb = powerDb(smooth[pk]), noiseDb = powerDb(noisePower);
+    q("rx-power").textContent = peakDb.toFixed(1);
+    q("rx-noise").textContent = noiseDb.toFixed(1);
+    q("rx-snr").textContent = (peakDb - noiseDb).toFixed(1);
     q("rx-integ-note").textContent = integM === 1 ? "Sin promedio" :
       `Promedio de ${integM} frames` + (fps > 0.5 ? ` ≈ ${(integM / fps).toFixed(integM / fps < 10 ? 1 : 0)} s` : "") + (integSeen < integM ? ` · acumulando ${integSeen}/${integM}` : "");
-    q("rx-integ-in").textContent = `Entrada: ${fmtIn(inStats.min)} … ${fmtIn(inStats.max)}` + (inStats.bad ? ` · ${inStats.bad} bins no válidos` : "");
+    q("rx-integ-in").textContent = `Entrada: ${powerDb(mn).toFixed(1)} … ${powerDb(mx).toFixed(1)} dB`
+      + (bad ? ` · ${bad} bins no válidos` : "");
     updatePill();
   }
 }
@@ -274,6 +283,17 @@ function connect() {
 }
 
 // ── Configuración del receptor (REST → AD9361) ──────────────────────────────
+function setSpectrumGeometry(freq, rate) {
+  if (!Number.isFinite(freq) || !Number.isFinite(rate) || rate <= 0) return;
+  if (cfg.freq === freq && cfg.rate === rate) return;
+  cfg = {freq, rate};
+  resetIntegration();
+  rangeInit = false;
+  bctx.fillStyle = css("--bg");
+  bctx.fillRect(0, 0, wfBuf.width, wfBuf.height);
+  draw();
+}
+
 function fillForm(c) {
   q("rx-gain").value = Number(c.rx_gain).toFixed(1);
   q("rx-gmode").value = c.rx_gain_mode;
@@ -285,8 +305,7 @@ function fillForm(c) {
   q("rx-sslider").value = c.sampling_frequency / 1e6;
   q("rx-bw").value = trimZeros(c.rx_rf_bandwidth / 1e6, 3);
   q("rx-bslider").value = c.rx_rf_bandwidth / 1e6;
-  cfg.freq = c.rx_lo_frequency; cfg.rate = c.sampling_frequency; cfg.bw = c.rx_rf_bandwidth;
-  draw();
+  setSpectrumGeometry(c.center_freq_hz ?? c.rx_lo_frequency, c.span_hz ?? c.sampling_frequency);
 }
 async function request(method, body) {
   const r = await fetch("/api/rf/config", {
@@ -431,9 +450,16 @@ async function refreshLinkNote() {
     const response = await fetch("/api/rf/status", {cache: "no-store"});
     if (!response.ok) throw Error("Estado RF no disponible");
     const s = await response.json(), pill = q("signal-pill");
+    setSpectrumGeometry(s.center_freq_hz, s.span_hz);
     const label = q("rf-tracking");
     const trackingText = s.tracking ? "En seguimiento: " + s.tracking.name : "Sin seguimiento activo";
     if (label.textContent !== trackingText) label.textContent = trackingText;
+    const peak = s.pass_peak;
+    q("rf-pass-snr").textContent = peak ? `${peak.snr_max_db.toFixed(1)} dB` : "—";
+    q("rf-pass-peak").textContent = peak ? fmtMHz(peak.peak_freq_hz / 1e6) : "—";
+    q("rf-pass-center").textContent = peak ? fmtMHz(peak.center_freq_hz / 1e6) : "—";
+    q("rf-metrics-status").textContent = s.metrics_error ||
+      (peak && !s.tracking ? `Guardado · ${peak.satellite}` : s.tracking && !peak ? "Esperando mediciones en la bajada" : "");
     pill.title = !s.connected ? `Sin conexión con Maia en ${s.server_url}${s.error ? " — " + s.error : ""}. Verifica la IP de la Pluto (--pluto-ip) y el puerto 8000.`
       : !s.streaming ? `Conectado a ${s.server_url}, pero no llegan frames de espectro${s.error ? " — " + s.error : ""}.` : `Maia en ${s.server_url}`;
   } catch (_) { q("rf-tracking").textContent = "Estado de seguimiento no disponible"; }

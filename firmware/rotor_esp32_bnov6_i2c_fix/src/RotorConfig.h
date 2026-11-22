@@ -14,6 +14,11 @@ constexpr uint8_t AZ_DIR_PIN  = 23;
 constexpr uint8_t AZ_STEP_PIN = 22;
 constexpr uint8_t EL_DIR_PIN  = 21;
 constexpr uint8_t EL_STEP_PIN = 19;
+constexpr uint8_t AZ_LIMIT_PIN = 32;          // INPUT_PULLUP, LOW = final de carrera activo
+constexpr uint32_t AZ_LIMIT_RELEASE_MS = 30;  // HIGH estable antes del STOP automático
+constexpr uint32_t AZ_LIMIT_APPROACH_MS = 250;  // antigüedad máxima del último paso al detectar LOW
+constexpr double AZ_LIMIT_BACKOFF_MAX_DEG = 3.0;
+constexpr float AZ_LIMIT_BACKOFF_SPEED = 100.0f;  // micropasos/s
 // Sentido de giro. Con lazo cerrado un sentido invertido NO es solo "gira al revés":
 // el control empujaría en la dirección equivocada. El detector de fallas (más abajo)
 // lo detecta y detiene los motores con ERR,fault_az / ERR,fault_el; si pasa en la
@@ -36,6 +41,10 @@ constexpr double AZ_STEPS_PER_DEG =
     AZ_FULL_STEPS_PER_REV * AZ_MICROSTEPS * AZ_GEAR_RATIO / 360.0;
 constexpr double EL_STEPS_PER_DEG =
     EL_FULL_STEPS_PER_REV * EL_MICROSTEPS * EL_GEAR_RATIO / 360.0;
+constexpr unsigned AZ_LIMIT_BACKOFF_MAX_STEPS =
+    static_cast<unsigned>(AZ_LIMIT_BACKOFF_MAX_DEG * AZ_STEPS_PER_DEG);
+static_assert(AZ_LIMIT_BACKOFF_MAX_STEPS > 0 && AZ_LIMIT_BACKOFF_SPEED > 0,
+              "El retroceso debe permitir al menos un paso");
 
 // ───────────────────────── Dinámica ─────────────────────────
 // Velocidad máxima (micropasos/s). Con 88.9 pasos/° son 400 pasos/s ≈ 4.5 °/s.
@@ -61,6 +70,12 @@ constexpr int IMU_SCL_PIN = 26;
 constexpr uint32_t IMU_I2C_HZ = 50000;
 constexpr uint8_t IMU_ADDRESS = 0x4B;      // 0x4B si el pin SA0/DI está en alto
 constexpr uint32_t IMU_REPORT_US = 10000;  // un dato cada 10 ms (100 Hz)
+// Vigilante: si el sensor contesta por I2C pero no llega ningún reporte de orientación en este
+// tiempo, se reinicia el bus y el sensor (begin() solo prueba que responde, no que transmita).
+constexpr uint32_t IMU_DATA_WATCHDOG_MS = 1500;
+// GPIO conectado al pin RST del BNO085 (reset por hardware en cada reintento). -1 = sin cablear.
+// Recomendado cablearlo (p. ej. GPIO 27, libre): es la forma más fiable de recuperar el sensor.
+constexpr int IMU_RST_PIN = -1;
 // Sin datos del sensor por este tiempo -> los motores frenan y se deja de enviar POS.
 constexpr uint32_t IMU_TIMEOUT_MS = 300;
 constexpr bool PRINT_BNO_DATA = true;
@@ -99,7 +114,7 @@ constexpr bool IMU_USE_GAME_ROTATION = false;
 // X coincide con la bisagra de elevacion, por eso no sirve como boresight.
 // (Si cambias el montaje o ya corriste CALAX con otro valor, usa BORE,x,y,z por UART.)
 constexpr double BORESIGHT_X = 0.0;
-constexpr double BORESIGHT_Y = 1.0;
+constexpr double BORESIGHT_Y = -1.0;
 constexpr double BORESIGHT_Z = 0.0;
 
 // Referencia del azimut.
@@ -118,7 +133,7 @@ constexpr bool AZ_ABSOLUTE_MAGNETIC = true;
 // Valor del lugar de uso: 0.08 deg E (+-0.37 deg), variando 0.18 deg W por año (NOAA/NCEI).
 // La deriva anual es menor que la incertidumbre del modelo: no hace falta actualizarlo.
 constexpr double MAG_DECLINATION_DEG = 0.08;
-constexpr double EL_OFFSET = -82;
+constexpr double EL_OFFSET = 0;
 
 // ───────────────────────── Calibración de ejes (comando CALAX) ─────────────────────────
 // CALAX mueve cada eje ±CAL_SWEEP_DEG con los motores (lazo abierto, despejar el rotor) y mide
@@ -131,8 +146,11 @@ constexpr uint32_t CAL_SETTLE_MS = 1500;        // espera tras cada tramo para q
 
 // ───────────────────────── Lazo de control ─────────────────────────
 // SET : va a la posición y la mantiene (corrigiendo si el sensor ve que se desvió).
-// TRK : velocidad = vsat + CTRL_KP * error (feedforward + P) sobre la posición medida.
+// TRK : velocidad = vsat + CTRL_KP * error + corrección integral.
 constexpr double CTRL_KP = 2.0;            // 1/s, ganancia sobre el error de posición
+constexpr double TRK_KI_AZ = 0.8;          // 1/s², 0 desactiva la integral de azimut
+constexpr double TRK_KI_EL = 0.8;          // 1/s², 0 desactiva la integral de elevación
+constexpr double TRK_MAX_INTEGRAL_DEG_S = 1.5;  // °/s, corrección máxima por eje
 constexpr double GOTO_DEADBAND_DEG = 0.5;  // error aceptado en SET; no bajar de la
                                            // precisión del sensor (≈1-2° con magnetómetro)
 constexpr uint32_t TRK_TIMEOUT_MS = 1500;  // sin TRK por este tiempo -> frenar y mantener
@@ -202,6 +220,8 @@ static_assert(CAL_SWEEP_DEG > 1 && CAL_SPEED_STEPS > 0 && CAL_SPEED_STEPS <= AZ_
                   CAL_SPEED_STEPS <= EL_MAX_SPEED, "Parámetros de CALAX inválidos");
 static_assert(BAT_SAMPLES > 0 && BAT_R2_OHM > 0, "Parámetros de batería inválidos");
 static_assert(CTRL_KP > 0 && GOTO_DEADBAND_DEG >= 0, "Parámetros de control inválidos");
+static_assert(TRK_KI_AZ >= 0 && TRK_KI_EL >= 0 && TRK_MAX_INTEGRAL_DEG_S >= 0,
+              "Parámetros de la integral de seguimiento inválidos");
 static_assert(FAULT_WINDOW_MS > 0 && FAULT_MIN_DEG > 0 && FAULT_MIN_RATIO > 0 &&
                   FAULT_MIN_RATIO < 1, "Parámetros del detector de fallas inválidos");
 }  // namespace RotorConfig

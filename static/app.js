@@ -62,7 +62,7 @@ function showSource(catalog) {
 async function loadStatus() {
   try {
     const data = await api("/api/status");
-    showSource(data.catalog);
+    showSource(data.catalog); markUpdating(data.catalog);
     window.RF_SERVER_URL = (data.rf || {}).server_url || null;   // lo usa rf.js para el aviso de conexión
   }
   catch (error) { toast(error.message); }
@@ -192,7 +192,8 @@ async function startSession() {
   const button = $("start-session"); button.disabled = true;
   try {
     const txChoice = $("transmitter").value;
-    const body = {norad_id:selected.norad_id, ...observer(), ...passFilters(), speed:Number($("speed").value), rotor_follow:!!(window.rotorAutoFollow && window.rotorAutoFollow())};
+    const real = $("speed").value === "real";
+    const body = {norad_id:selected.norad_id, ...observer(), ...passFilters(), realtime:real, speed:real ? 1 : Number($("speed").value), rotor_follow:!!(window.rotorAutoFollow && window.rotorAutoFollow())};
     if (txChoice === "manual") body.manual_frequency_mhz = Number($("manual-frequency").value);
     else body.transmitter_uuid = txChoice;
     if (sessionId) await api(`/api/session/${sessionId}/control`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"stop"})}).catch(() => {});
@@ -202,7 +203,7 @@ async function startSession() {
     if (data.follow_error) toast(data.follow_error);
     showTab("track");   // el seguimiento ocupa la pantalla; la selección queda en la pestaña 1
     renderState(data.state);
-    log(`Simulación iniciada para ${selected.name}; próximo pase acelerado ${body.speed}×.`);
+    log(real ? `Seguimiento en tiempo real de ${selected.name}: el reloj es la hora real y el rotor espera el AOS.` : `Simulación iniciada para ${selected.name}; próximo pase a ${body.speed}×.`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = !selected || !selected.passes.length; }
 }
@@ -234,14 +235,17 @@ function renderState(state) {
   if (sessionId && pathSession !== sessionId) loadPath(sessionId);
   const geo = state.geometry, rotor = state.rotor, rf = state.receiver;
   $("tracking-title").textContent = state.name;
-  $("sim-time").textContent = longTime(state.sim_time_chile) + ` · ${state.speed}×`;
+  $("sim-time").textContent = longTime(state.sim_time_chile) + (state.realtime ? "" : ` · ${state.speed}×`);
+  $("sim-label").textContent = state.realtime ? "REAL" : "SIM";
+  $("pause-session").disabled = !!state.realtime;      // pausar desincronizaría el reloj del pase real
   const phase = $("phase"); phase.textContent = state.phase.toUpperCase(); phase.className = "pill " + (state.phase === "en pase" ? "" : state.phase === "finalizado" ? "warn" : "muted");
   $("pass-progress").style.width = `${Math.round(state.progress * 100)}%`;
   $("pause-session").textContent = state.status === "paused" ? "Reanudar" : "Pausar";
   if (lastPhase !== state.phase) { log(`Fase del pase: ${state.phase}.`); lastPhase = state.phase; }
   const previous = trail.at(-1);
   if (!previous || previous.time !== state.sim_time_utc) {
-    trail.push({time:state.sim_time_utc, az:geo.az_deg, el:geo.el_deg, lat:geo.subsat_lat_deg, lon:geo.subsat_lon_deg});
+    trail.push({time:state.sim_time_utc, az:geo.az_deg, el:geo.el_deg, lat:geo.subsat_lat_deg, lon:geo.subsat_lon_deg,
+                raz:rotor?.az_deg ?? null, rel:rotor?.el_deg ?? null});   // raz/rel: trayectoria real del tracker
     if (trail.length > 120) trail.shift();
   }
   requestAnimationFrame(drawAll);
@@ -272,22 +276,24 @@ function simNow() {
   return base + (latest.status === "running" ? (performance.now() - stateAt) * latest.speed : 0);
 }
 const clock = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60, p = n => String(n).padStart(2, "0"); return (h ? h + ":" : "") + p(m) + ":" + p(x); };
-function drawSky() {
-  const {ctx,width:w,height:h} = canvasContext("sky-canvas"), mono = "Consolas, 'JetBrains Mono', monospace";
-  const margin = 17, radius = Math.max(20, Math.min(w, h) / 2 - margin), cx = w - radius - margin - 2, cy = h / 2;
+// `compact`: versión pequeña (ventana flotante de la pestaña RF): sin lecturas numéricas, letra menor, radar centrado.
+function drawSky(id = "sky-canvas", compact = false) {
+  const {ctx,width:w,height:h} = canvasContext(id), mono = "Consolas, 'JetBrains Mono', monospace";
+  const fs = compact ? 11 : 16, margin = compact ? 14 : 17, radius = Math.max(20, Math.min(w, h) / 2 - margin);
+  const cx = compact ? w / 2 : w - radius - margin - 2, cy = h / 2;
   // Anillos de elevación (0°, 30°, 60°) y ejes de azimut cada 45°
   ctx.strokeStyle = "#9fc0d5"; ctx.lineWidth = 1;
   for (const k of [1, 2/3, 1/3]) { ctx.beginPath(); ctx.arc(cx, cy, radius * k, 0, Math.PI * 2); ctx.stroke(); }
   ctx.beginPath();
   for (let a = 0; a < 180; a += 45) { const r = a * Math.PI / 180; ctx.moveTo(cx - radius * Math.sin(r), cy + radius * Math.cos(r)); ctx.lineTo(cx + radius * Math.sin(r), cy - radius * Math.cos(r)); }
   ctx.stroke();
-  ctx.fillStyle = "#799bb0"; ctx.font = `16px ${mono}`; ctx.textAlign = "left";
+  ctx.fillStyle = "#799bb0"; ctx.font = `${fs}px ${mono}`; ctx.textAlign = "left";
   ctx.fillText("30°", cx + 3, cy - radius * 2/3 + 10); ctx.fillText("60°", cx + 3, cy - radius / 3 + 10);
-  ctx.fillStyle = "#2b4e60"; ctx.font = `700 16px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#2b4e60"; ctx.font = `700 ${fs}px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillText("N", cx, cy - radius - 9); ctx.fillText("S", cx, cy + radius + 9); ctx.fillText("E", cx + radius + 9, cy); ctx.fillText("O", cx - radius - 9, cy);
   ctx.textBaseline = "alphabetic";
   if (!latest) {
-    ctx.fillStyle = "#5e7b8f"; ctx.font = `16px ${mono}`; ctx.textAlign = "center"; ctx.fillText("Inicia una sesión", cx, cy + 4);
+    ctx.fillStyle = "#5e7b8f"; ctx.font = `${fs}px ${mono}`; ctx.textAlign = "center"; ctx.fillText("Inicia una sesión", cx, cy + 4);
     return;
   }
   // Trayectoria completa del pase (tenue) y tramo ya recorrido (brillante)
@@ -301,15 +307,24 @@ function drawSky() {
     line(pts, "#1284a866", 1.6, [5, 4]);
     for (const [i, name] of [[0, "AOS"], [pts.length - 1, "LOS"]]) {
       const [x, y] = skyPoint(pts[i].az, Math.max(0, pts[i].el), cx, cy, radius);
-      dot(ctx, x, y, 3, "#395d70"); ctx.fillStyle = "#395d70"; ctx.font = `600 16px ${mono}`; ctx.textAlign = "center";
-      ctx.fillText(name, Math.max(14, Math.min(w - 14, x)), y + (y < cy ? -7 : 14));
+      dot(ctx, x, y, 3, "#395d70"); ctx.fillStyle = "#395d70"; ctx.font = `600 ${fs}px ${mono}`; ctx.textAlign = "center";
+      ctx.fillText(name, Math.max(14, Math.min(w - 14, x)), y + (y < cy ? -5 : fs - 1 + 2));
     }
   }
-  line(trail.map(p => ({az: p.az, el: p.el})), "#1284a8", 2.2);
-  const g = latest.geometry, up = g.el_deg >= 0;
+  line(trail.map(p => ({az: p.az, el: p.el})), "#1284a8", compact ? 1.8 : 2.2);                                     // satélite
+  line(trail.filter(p => p.raz != null).map(p => ({az: p.raz, el: p.rel})), "#935500", compact ? 1.6 : 2, [2, 3]);  // tracker
+  const g = latest.geometry, up = g.el_deg >= 0, mr = compact ? 5 : 7;
   const [rx, ry] = skyPoint(latest.rotor.az_deg, latest.rotor.el_deg, cx, cy, radius);
-  dot(ctx, rx, ry, 7, "#935500"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke();
-  if (up) { const [sx, sy] = skyPoint(g.az_deg, g.el_deg, cx, cy, radius); dot(ctx, sx, sy, 7, "#61a119"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke(); }
+  dot(ctx, rx, ry, mr, "#935500"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke();
+  if (up) { const [sx, sy] = skyPoint(g.az_deg, g.el_deg, cx, cy, radius); dot(ctx, sx, sy, mr, "#61a119"); ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 1.5; ctx.stroke(); }
+  if (compact) {      // leyenda mínima y cuenta atrás de AOS/LOS
+    const t = simNow(), aos = utcMs(latest.pass.aos_utc), los = utcMs(latest.pass.los_utc);
+    ctx.textAlign = "left"; ctx.font = `${fs}px ${mono}`;
+    ctx.fillStyle = "#61a119"; ctx.fillText("● sat", 4, h - 20); ctx.fillStyle = "#935500"; ctx.fillText("● tracker", 4, h - 6);
+    ctx.textAlign = "right"; ctx.fillStyle = "#395d70";
+    ctx.fillText(t < aos ? "AOS " + clock((aos - t) / 1000) : t < los ? "LOS " + clock((los - t) / 1000) : "FIN", w - 4, h - 6);
+    return;
+  }
 
   // Lectura en tiempo real (esquina superior izquierda) y cuenta atrás
   ctx.textAlign = "left";
@@ -326,8 +341,11 @@ function drawSky() {
   ctx.fillStyle = "#5e7e90"; ctx.font = `16px ${mono}`;
   ctx.fillStyle = "#61a119"; ctx.fillText("● satélite", 4, h - 20); ctx.fillStyle = "#935500"; ctx.fillText("● rotor", 4, h - 7);
 }
-function drawAll(){ if ($("panel-track").hidden) return; drawSky(); }
-setInterval(() => { if (latest && !$("panel-track").hidden) drawSky(); }, 250);
+function drawAll(){
+  if (!$("panel-track").hidden) drawSky();
+  if (!$("panel-rf").hidden && !$("rf-mini").hidden) drawSky("sky-mini", true);   // copia pequeña en la pestaña RF
+}
+setInterval(() => { if (latest) drawAll(); }, 250);
 
 let searchTimer;
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadCatalog(true),250);});
@@ -395,8 +413,38 @@ $("manual-frequency").addEventListener("change",()=>{if($("transmitter").value==
 $("start-session").addEventListener("click",startSession);
 $("pause-session").addEventListener("click",()=>control(latest?.status==="paused"?"resume":"pause"));
 $("stop-session").addEventListener("click",()=>control("stop"));
-$("speed").addEventListener("change",()=>{if(sessionId)control("speed",{speed:Number($("speed").value)});});
-$("refresh-sources").addEventListener("click",async()=>{try{const data=await api("/api/catalog/refresh",{method:"POST"});showSource(data.catalog);log(data.started?"Actualización de CelesTrak y SatNOGS iniciada.":"Las fuentes ya se están actualizando.");}catch(error){toast(error.message);}});
+const syncStartLabel = () => { $("start-session").textContent = $("speed").value === "real" ? "▶ Seguir pase" : "▶ Simular pase"; };
+$("speed").addEventListener("change",()=>{
+  syncStartLabel();
+  const v = $("speed").value;
+  if (sessionId && v !== "real" && !latest?.realtime) control("speed",{speed:Number(v)});   // el modo de una sesión no cambia: se elige al iniciar
+});
+syncStartLabel();
+// Actualización independiente de TLE (CelesTrak) y transmisores (SatNOGS)
+const SOURCES = {tle: {btn: "refresh-tle", name: "TLE (CelesTrak)"}, tx: {btn: "refresh-tx", name: "transmisores (SatNOGS)"}};
+function markUpdating(catalog) {
+  const busy = new Set(catalog?.updating_sources || []);
+  for (const [key, {btn}] of Object.entries(SOURCES)) { $(btn).disabled = busy.has(key); $(btn).classList.toggle("busy", busy.has(key)); }
+}
+async function refreshSource(key) {
+  try {
+    const data = await api("/api/catalog/refresh", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source:key})});
+    showSource(data.catalog); markUpdating(data.catalog);
+    log(data.started.length ? `Actualización de ${SOURCES[key].name} iniciada.` : `${SOURCES[key].name} ya se estaba actualizando.`);
+    for (let i = 0; i < 60; i++) {                       // espera a que termine (máx. ~2 min) y informa el resultado
+      await new Promise(r => setTimeout(r, 2000));
+      const st = (await api("/api/status")).catalog;
+      showSource(st); markUpdating(st);
+      if (!st.updating_sources.includes(key)) {
+        if (st.last_error) { toast(st.last_error); log("Error al actualizar: " + st.last_error); }
+        else { log(`${SOURCES[key].name} actualizado.`); loadCatalog(true); }
+        return;
+      }
+    }
+  } catch (error) { toast(error.message); }
+}
+$("refresh-tle").addEventListener("click", () => refreshSource("tle"));
+$("refresh-tx").addEventListener("click", () => refreshSource("tx"));
 window.addEventListener("resize",()=>requestAnimationFrame(drawAll));
 setInterval(()=>{$("clock").textContent=new Date().toLocaleString("es-CL",{timeZone:"America/Santiago",hour12:false})+" CL";},1000);
 setInterval(pollSession,900);
