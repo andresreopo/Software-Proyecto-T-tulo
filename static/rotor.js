@@ -114,7 +114,7 @@ function schedule() {
 // ── Consola serial (TX/RX) ──────────────────────────────────────────────────
 const con = q("serial-console"); let conPaused = false, conBuf = [];
 function conLine(kind, text) {
-  if (kind !== "sys" && !q("con-poll").checked && /^(POS|TRK|BAT)\b/.test(text)) return;
+  if (kind !== "sys" && !q("con-poll").checked && /^(POS|TRK|BAT|BNO)\b/.test(text)) return;
   if (conPaused) { conBuf.push([kind, text]); if (conBuf.length > 1000) conBuf.shift(); return; }
   const row = document.createElement("div"); row.className = "con-" + kind;
   const tm = new Date(), p = n => String(n).padStart(2, "0");
@@ -182,7 +182,7 @@ function connectWs() {
     let m; try { m = JSON.parse(e.data); } catch (_) { return; }
     if (m.type === "rotor") applyRotor(m);
     else if (m.type === "rotor_io") conLine(m.dir, m.text);
-    else if (m.type === "rotor_msg") log("ESP32: " + m.text);
+    else if (m.type === "rotor_msg") { if (q("con-poll").checked || !/^BNO\b/.test(m.text)) log("ESP32: " + m.text); }
     else if (m.type === "follow") applyFollow(m);
   };
   ws.onclose = () => setTimeout(connectWs, 1500);
@@ -290,7 +290,8 @@ const builders = {
     return `BORE,${v.map(x => x.toFixed(3)).join(",")}`;
   },
 };
-const CONFIRM = {CALAX: "CALAX moverá el rotor ±grados durante ~30 s. ¿Iniciar la calibración de ejes?",
+const CONFIRM = {HOMEEL: "HOMEEL mueve la elevación hasta el final de carrera inferior para referenciarla. Mantén despejada la trayectoria. ¿Iniciar?",
+                 CALAX: "CALAX moverá el rotor ±grados durante ~30 s. ¿Iniciar la calibración de ejes?",
                  BORE: "BORE reemplaza la dirección “adelante” guardada y pone el offset de elevación a 0. ¿Enviar?"};
 async function sendCommand(text, key) {
   if (cmdBusy) return;

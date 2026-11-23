@@ -188,6 +188,7 @@
                   {{ cmd_slider("cmd-cal-el", "Elevación real", -90, 90, 0.5, 0) }}
                   <button type="button" class="button primary full" data-send="cal">Enviar CAL</button>
                   <div class="cmd-quick">
+                    <button type="button" class="button secondary" data-cmd="HOMEEL" title="Referencia la elevación buscando el final de carrera inferior">HOMEEL</button>
                     <button type="button" class="button secondary" data-cmd="CALAX" title="Calibra ejes (~30 s)">CALAX</button>
                     <button type="button" class="button secondary" data-cmd="MAGCAL">MAGCAL</button>
                     <button type="button" class="button secondary" data-cmd="SAVECAL">SAVECAL</button>
@@ -206,7 +207,7 @@
               </details>
             </section>
             <div class="console-head"><span>CONSOLA</span>
-              <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK/BAT</label>
+              <label class="rf-check"><input type="checkbox" id="con-poll" checked> POS/TRK/BAT/BNO</label>
               <button type="button" class="button ghost" id="con-pause">Pausar</button>
               <button type="button" class="button ghost" id="con-clear">Limpiar</button></div>
             <div id="serial-console" class="serial-console" role="log" aria-live="off"></div>

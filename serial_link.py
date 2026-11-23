@@ -125,6 +125,8 @@ class SimPort:
                     self.tgt = (self.az, self.el)
                     self.trk, self.ff = False, (0.0, 0.0)
                     self._q.put(b"ACK\n")
+                elif len(p) == 1 and p[0].upper() == "HOMEEL":
+                    self._q.put(b"ACK\n")
                 elif len(p) == 5 and p[0].upper() == "TRK":
                     self.tgt = (float(p[1]) % 360.0, float(p[2]))
                     self.ff = (float(p[3]), float(p[4]))
